@@ -1,0 +1,34 @@
+[package]
+name = "llm-wires"
+version = "0.1.0"
+description = "The LLM wires: one Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming"
+keywords = ["llm", "anthropic", "openai", "claude", "streaming"]
+categories = ["api-bindings", "asynchronous"]
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+test-support = ["dep:tokio"]
+
+[dependencies]
+wire-secret.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures-util.workspace = true
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "http2", "json", "stream"] }
+rustls.workspace = true
+rustls-native-certs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true, features = ["net", "io-util", "time"] }
+
+[dev-dependencies]
+llm-wires = { path = ".", features = ["test-support"] }
+anyhow.workspace = true
+rcgen.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+tokio-rustls.workspace = true
