@@ -412,7 +412,9 @@ async fn a_4xx_carries_the_apis_message_and_not_the_request() {
         .expect_err("a 401 is an error");
 
     match &err {
-        Error::Api { status, message } => {
+        Error::Api {
+            status, message, ..
+        } => {
             assert_eq!(*status, 401);
             assert_eq!(message, "invalid x-api-key");
         }

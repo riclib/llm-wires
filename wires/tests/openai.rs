@@ -528,7 +528,9 @@ async fn a_4xx_carries_the_apis_message_and_not_the_request() {
         .expect_err("a 401 is an error");
 
     match &err {
-        Error::Api { status, message } => {
+        Error::Api {
+            status, message, ..
+        } => {
             assert_eq!(*status, 401);
             assert_eq!(message, "Incorrect API key provided: sk-li***key.");
         }
@@ -549,7 +551,9 @@ async fn a_gateways_html_error_page_still_reaches_the_operator() {
     )
     .unwrap();
     match client.chat(ChatRequest::ask("", "hi")).await {
-        Err(Error::Api { status, message }) => {
+        Err(Error::Api {
+            status, message, ..
+        }) => {
             assert_eq!(status, 502);
             assert_eq!(message, "<html>502 Bad Gateway</html>");
         }
@@ -570,7 +574,9 @@ async fn a_stream_that_opens_with_a_4xx_never_becomes_a_stream() {
     )
     .unwrap();
     match client.chat_stream(ChatRequest::ask("", "hi")).await {
-        Err(Error::Api { status, message }) => {
+        Err(Error::Api {
+            status, message, ..
+        }) => {
             assert_eq!(status, 429);
             assert_eq!(message, "Rate limit reached for gpt-4o.");
         }

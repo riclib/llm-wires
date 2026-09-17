@@ -1,6 +1,6 @@
 //! The LLM wires.
 //!
-//! One trait, one set of types, one switch. A caller names a [`Wire`] and a
+//! Two traits, one set of types, one switch. A caller names a [`Wire`] and a
 //! key and gets back a `Box<dyn Provider>` that can be asked a question:
 //!
 //! ```no_run
@@ -15,6 +15,35 @@
 //! println!("{}", answer.message.content);
 //! # Ok(()) }
 //! ```
+//!
+//! Or, on the TypeSafe wire, a `Box<dyn Judge>` that answers typed questions
+//! about a state with calibrated probabilities rather than text:
+//!
+//! ```no_run
+//! # async fn go() -> llm_wires::Result<()> {
+//! use llm_wires::{Answer, Judgement, Question, Wire};
+//!
+//! let judge = llm_wires::build_judge(
+//!     Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+//!     Some(wire_secret::Secret::from("ts-…")),
+//! )?;
+//! let verdict = judge
+//!     .judge(
+//!         Judgement::of("Help! My payouts have been failing for 3 days.")
+//!             .ask("is_urgent", Question::noul("Does this convey urgency?")),
+//!     )
+//!     .await?;
+//! if let Answer::Noul { yes } = verdict.answers["is_urgent"] {
+//!     println!("urgent with p={yes}");
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! Two traits and not one with more methods, because a deployment that
+//! judges cannot chat and one that chats cannot judge: a single interface
+//! would force every implementation to carry a method that always errors.
+//! The switch stays one — `Wire` names every wire — and the trait a wire
+//! speaks is decided at [`build`] or [`build_judge`], once.
 //!
 //! ## What this crate is not
 //!
@@ -38,12 +67,14 @@
 mod anthropic;
 mod error;
 mod http;
+mod judgement;
 mod openai;
 mod sse;
 #[cfg(feature = "test-support")]
 pub mod testing;
 mod tls;
 mod types;
+mod typesafe;
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -53,6 +84,7 @@ use futures_util::Stream;
 use wire_secret::Secret;
 
 pub use error::{Error, Result};
+pub use judgement::{Answer, Judgement, Question, Verdict};
 pub use types::{
     ChatRequest, ChatResponse, Chunk, Finish, Info, Message, Role, Tool, ToolCall, ToolCallDelta,
     Usage,
@@ -81,6 +113,21 @@ pub trait Provider: Send + Sync {
     fn info(&self) -> Info;
 }
 
+/// One deployment, asked to judge.
+///
+/// Beside [`Provider`] and not part of it: a [`Judgement`] is a state and a
+/// map of typed questions, a [`Verdict`] is one calibrated answer per
+/// question, and nothing in that is a chat. The model is the [`Wire`]'s, as
+/// it is for a chat client.
+#[async_trait]
+pub trait Judge: Send + Sync {
+    /// Every question, answered.
+    async fn judge(&self, req: Judgement) -> Result<Verdict>;
+
+    /// What this client is, for a pane and a log line. Never a key.
+    fn info(&self) -> Info;
+}
+
 /// Extra headers sent on every request, in a stable order.
 ///
 /// Sorted rather than insertion-ordered so a request is the same bytes twice —
@@ -92,8 +139,10 @@ pub type Headers = BTreeMap<String, String>;
 /// Which wire, where, and speaking for what.
 ///
 /// The kinds an operator picks in the pane — `openai`, `azure`, `ollama`,
-/// `openrouter`, `anthropic` — collapse onto these three; the mapping lives
-/// in `domains::llm`, one level up, where the card is.
+/// `openrouter`, `anthropic`, `typesafe` — collapse onto these four; the
+/// mapping lives in `domains::llm`, one level up, where the card is. Three
+/// of them chat and are built with [`build`]; one judges and is built with
+/// [`build_judge`]. The enum is one so that the card keeps one switch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wire {
     /// `POST {endpoint}/chat/completions` with a bearer key. Serves OpenAI
@@ -130,6 +179,14 @@ pub enum Wire {
         model: String,
         headers: Headers,
     },
+    /// `POST {endpoint}/v1/systemone` with a bearer key: TypeSafe's System
+    /// One, a [`Judge`] and not a [`Provider`]. The `/v1` is the wire's, as
+    /// Anthropic's is; the endpoint on the card is the host.
+    TypeSafe {
+        endpoint: String,
+        model: String,
+        headers: Headers,
+    },
 }
 
 impl Wire {
@@ -139,6 +196,7 @@ impl Wire {
             Wire::OpenAi { .. } => "openai",
             Wire::Azure { .. } => "azure",
             Wire::Anthropic { .. } => "anthropic",
+            Wire::TypeSafe { .. } => typesafe::WIRE,
         }
     }
 
@@ -159,13 +217,22 @@ impl Wire {
             headers: Headers::new(),
         }
     }
+
+    /// The common case for TypeSafe.
+    pub fn typesafe(endpoint: impl Into<String>, model: impl Into<String>) -> Wire {
+        Wire::TypeSafe {
+            endpoint: endpoint.into(),
+            model: model.into(),
+            headers: Headers::new(),
+        }
+    }
 }
 
 /// Azure's version when the card leaves it blank. Go's default, kept: an
 /// operator who has not thought about it gets a version that serves tools.
 pub const AZURE_DEFAULT_API_VERSION: &str = "2024-08-01-preview";
 
-/// The ONE switch over wires.
+/// The ONE switch over wires that chat.
 ///
 /// `key` is a [`wire_secret::Secret`] and not a `String` so that a client cannot
 /// carry a key anything could print: the body reaches a header value marked
@@ -219,6 +286,36 @@ pub fn build(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Provider>> {
                 &endpoint, &model, &headers, &key,
             )?))
         }
+        Wire::TypeSafe { .. } => Err(Error::Cannot {
+            wire: name,
+            verb: "chat",
+        }),
+    }
+}
+
+/// The switch over wires that judge. One arm today; the shape is the same as
+/// [`build`]'s so that a second judging wire is an arm and not a redesign.
+///
+/// The key rule is [`build`]'s: `None` is refused, every wire authenticates.
+pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
+    let name = wire.name();
+    let key = key.ok_or(Error::NoKey(name))?;
+    match wire {
+        Wire::TypeSafe {
+            endpoint,
+            model,
+            headers,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "model", &model)?;
+            Ok(Box::new(typesafe::TypeSafe::system_one(
+                &endpoint, &model, &headers, &key,
+            )?))
+        }
+        Wire::OpenAi { .. } | Wire::Azure { .. } | Wire::Anthropic { .. } => Err(Error::Cannot {
+            wire: name,
+            verb: "judge",
+        }),
     }
 }
 
@@ -250,6 +347,51 @@ mod tests {
                 other => panic!("{name}: expected NoKey, got {other:?}", other = other.err()),
             }
         }
+        match build_judge(
+            Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+            None,
+        ) {
+            Err(Error::NoKey(got)) => assert_eq!(got, "typesafe"),
+            other => panic!("typesafe: expected NoKey, got {:?}", other.err()),
+        }
+    }
+
+    #[test]
+    fn a_wire_built_for_the_trait_it_does_not_speak_is_refused_by_name() {
+        // The whole of "a separate trait, never extra methods on Provider":
+        // the refusal is one error at build, not a method that always fails.
+        match build(
+            Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+            Some(Secret::from("k")),
+        ) {
+            Err(Error::Cannot { wire, verb }) => {
+                assert_eq!((wire, verb), ("typesafe", "chat"));
+            }
+            other => panic!("expected Cannot, got {:?}", other.err()),
+        }
+        for wire in [
+            Wire::openai("https://api.openai.com/v1", "gpt-4o"),
+            Wire::anthropic("https://api.anthropic.com", "claude-sonnet-4"),
+            Wire::Azure {
+                endpoint: "https://x.openai.azure.com".into(),
+                deployment: "gpt-4o".into(),
+                api_version: String::new(),
+            },
+        ] {
+            let name = wire.name();
+            match build_judge(wire, Some(Secret::from("k"))) {
+                Err(Error::Cannot { wire, verb }) => assert_eq!((wire, verb), (name, "judge")),
+                other => panic!("{name}: expected Cannot, got {:?}", other.err()),
+            }
+        }
+        assert_eq!(
+            Error::Cannot {
+                wire: "typesafe",
+                verb: "chat"
+            }
+            .to_string(),
+            "the typesafe wire cannot chat"
+        );
     }
 
     #[test]
@@ -276,6 +418,15 @@ mod tests {
         assert_eq!(client.info().wire, "anthropic");
         assert_eq!(client.info().model, "claude-sonnet-4");
         assert_eq!(client.info().endpoint, "https://api.anthropic.com");
+
+        let judge = build_judge(
+            Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+            Some(Secret::from("ts-x")),
+        )
+        .expect("the typesafe wire is built");
+        assert_eq!(judge.info().wire, "typesafe");
+        assert_eq!(judge.info().model, "jev-latest");
+        assert_eq!(judge.info().endpoint, "https://api.typesafe.ai");
     }
 
     #[test]
@@ -285,6 +436,8 @@ mod tests {
             (Wire::anthropic("", "claude-sonnet-4"), "endpoint"),
             (Wire::anthropic("https://api.anthropic.com", ""), "model"),
             (Wire::openai("https://api.openai.com/v1", "  "), "model"),
+            (Wire::typesafe("", "jev-latest"), "endpoint"),
+            (Wire::typesafe("https://api.typesafe.ai", ""), "model"),
             (
                 Wire::Azure {
                     // Azure's default endpoint is empty on the card: there is
@@ -305,7 +458,11 @@ mod tests {
             ),
         ];
         for (wire, want) in cases {
-            match build(wire, Some(Secret::from("k"))) {
+            let got = match wire {
+                Wire::TypeSafe { .. } => build_judge(wire, Some(Secret::from("k"))).map(|_| ()),
+                _ => build(wire, Some(Secret::from("k"))).map(|_| ()),
+            };
+            match got {
                 Err(Error::Missing { field, .. }) => assert_eq!(field, want),
                 other => panic!("expected Missing {want}, got {:?}", other.err()),
             }

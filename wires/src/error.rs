@@ -1,6 +1,8 @@
 //! One error for the crate.
 
-/// What can go wrong between a `ChatRequest` and an answer.
+use std::time::Duration;
+
+/// What can go wrong between a `ChatRequest` (or a `Judgement`) and an answer.
 ///
 /// The rule the [`Error::Api`] variant carries: an HTTP status arrives with
 /// the **body's** error message and nothing of the request. A request holds
@@ -25,6 +27,24 @@ pub enum Error {
         wire: &'static str,
         field: &'static str,
     },
+
+    /// A wire asked for the trait it does not speak: [`crate::build`] on the
+    /// TypeSafe wire, which cannot chat, or [`crate::build_judge`] on a chat
+    /// wire, which cannot judge. A separate trait was the point — one
+    /// interface would have forced a method that always errors — so the
+    /// refusal happens once, at `build`, and not on every call.
+    #[error("the {wire} wire cannot {verb}")]
+    Cannot {
+        wire: &'static str,
+        verb: &'static str,
+    },
+
+    /// A request the wire will not send, because the server would refuse it
+    /// and the reason is already known here: no questions, a score with one
+    /// level. Refused before the socket, with the caller's own words for the
+    /// field, so a solid step sees the mistake without a round trip.
+    #[error("{wire}: {what}")]
+    Invalid { wire: &'static str, what: String },
 
     /// The credential body is not text. Every wire we speak puts the key in a
     /// header, and a header value is bytes but a key that is not UTF-8 is a
@@ -73,9 +93,21 @@ pub enum Error {
     Http(reqwest::Error),
 
     /// The provider answered, and it answered no. `message` is the body's own
-    /// `error.message` — never the request.
-    #[error("the provider answered {status}: {message}")]
-    Api { status: u16, message: String },
+    /// `error.message` (or TypeSafe's `detail`) — never the request.
+    ///
+    /// `request_id` is the provider's own id for the exchange, from whichever
+    /// header the wire uses (`request-id`, `x-request-id`,
+    /// `x-typesafe-request-id`), so a failure row can be quoted to their
+    /// support without the request. `retry_after` is a 429's `retry-after-ms`
+    /// or `Retry-After`, surfaced and **not acted on**: this crate does not
+    /// retry, the run above it does, and this is the number the run wants.
+    #[error("the provider answered {status}: {message}{}", tag(.request_id))]
+    Api {
+        status: u16,
+        message: String,
+        request_id: Option<String>,
+        retry_after: Option<Duration>,
+    },
 
     /// The stream itself failed: an `error` frame mid-turn, or a body that
     /// stopped with a tool call half built. Its own variant and not an
@@ -92,6 +124,14 @@ pub enum Error {
     /// provider that refuses the default protocol versions.
     #[error("tls: {0}")]
     Tls(String),
+}
+
+/// ` (request …)` on the message when the provider gave an id, nothing when
+/// it did not.
+fn tag(request_id: &Option<String>) -> String {
+    request_id
+        .as_deref()
+        .map_or_else(String::new, |id| format!(" (request {id})"))
 }
 
 impl From<reqwest::Error> for Error {

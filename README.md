@@ -1,7 +1,9 @@
 # llm-wires
 
 One `Provider` trait over the **Anthropic** and **OpenAI** HTTP shapes — tools,
-streaming, and a key that cannot accidentally be printed.
+streaming, and a key that cannot accidentally be printed — and beside it a
+`Judge` trait over **TypeSafe**'s System One, for typed questions with
+calibrated answers.
 
 ```rust
 use llm_wires::{ChatRequest, Wire};
@@ -48,6 +50,55 @@ or a "deployment" is; those belong to whoever is calling.
 - **`ring`, not `aws-lc-rs`.** TLS is `rustls` with `rustls-no-provider` and a
   preconfigured config, so a binary that already ships `ring` does not end up
   linking two crypto backends.
+
+## `Judge`: the TypeSafe wire
+
+TypeSafe does not chat. A request is one `state` plus a map of typed questions,
+and each answer is a distribution the model calibrated, not text we parsed. So
+it is a second trait beside `Provider`, not extra methods on it — a deployment
+that judges cannot chat, and one interface would force a method that always
+errors. The `Wire` enum is still one, so a caller keeps one switch.
+
+```rust
+use llm_wires::{Answer, Judgement, Question, Wire};
+
+let judge = llm_wires::build_judge(
+    Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+    Some(wire_secret::Secret::from("ts-…")),
+)?;
+let verdict = judge.judge(
+    Judgement::of("Help! My payouts have been failing for 3 days.")
+        .ask("is_urgent", Question::noul("Does this convey urgency?"))
+        .ask("department", Question::choice("Which team should handle this?", [
+            ("billing", "Payments, invoicing, refunds"),
+            ("technical", "Bugs, outages, integrations"),
+        ]))
+        .ask("frustration", Question::score("How frustrated is the customer?",
+            ["Calm", "Frustrated", "Very angry"])),
+).await?;
+
+match &verdict.answers["department"] {
+    Answer::Choice { choice, confidence, .. } if *confidence > 0.8 => act(choice),
+    Answer::Choice { .. } => review(),
+    _ => unreachable!("a choice question gets a choice answer, or an Error::Decode"),
+}
+```
+
+- **Three question kinds, three answer kinds.** `noul` (yes/no, answered as a
+  probability), `choice` (labelled options, answered with the pick and the
+  whole distribution), `score` (an ordered rubric, answered as a weighted
+  level between the ends). Every leaf — the state, the instructions, a
+  description — is a `serde_json::Value`, because the wire takes text, an
+  object, an array or `null` at each of them.
+- **A 200 that is not what we asked is an error.** An answer missing for a
+  question, or of the wrong kind, is `Error::Decode`, not a verdict with a
+  hole a caller could read as a no.
+- **No retries, no thresholds.** A 429's `retry-after` is surfaced on
+  `Error::Api` and not acted on; what confidence is enough to act on is the
+  caller's number. The provider's request id rides the same error, on every
+  wire.
+- Read from the published SDK (`@typesafe-ai/sdk` 0.6.0) rather than the
+  docs' prose, where the two differ.
 
 ## `wire-secret`
 

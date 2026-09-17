@@ -1,8 +1,8 @@
 [package]
 name = "llm-wires"
-version = "0.1.0"
-description = "The LLM wires: one Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming"
-keywords = ["llm", "anthropic", "openai", "claude", "streaming"]
+version = "0.2.0"
+description = "The LLM wires: a Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming, and a Judge trait over TypeSafe's"
+keywords = ["llm", "anthropic", "openai", "typesafe", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 edition.workspace = true
 license.workspace = true

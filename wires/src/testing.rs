@@ -26,6 +26,9 @@ pub enum Reply {
     Json(&'static str),
     /// A status and a JSON body.
     Status(u16, &'static str),
+    /// A status, extra response headers, and a JSON body — for what a wire
+    /// reads off the head of a failure: a request id, a `retry-after`.
+    Headed(u16, &'static [(&'static str, &'static str)], &'static str),
     /// A chunked `text/event-stream`, one HTTP chunk per event, then the end.
     Sse(&'static [&'static str]),
     /// The same event forever, until the client goes away.
@@ -118,6 +121,9 @@ pub async fn fixture(reply: Reply) -> Fixture {
         match reply {
             Reply::Json(body) => reply_with(&mut sock, 200, body).await,
             Reply::Status(code, body) => reply_with(&mut sock, code, body).await,
+            Reply::Headed(code, headers, body) => {
+                reply_headed(&mut sock, code, headers, body).await;
+            }
             Reply::Sse(events) => {
                 sock.write_all(SSE_HEAD.as_bytes()).await.unwrap();
                 for e in events {
@@ -154,13 +160,21 @@ fn http_chunk(body: &str) -> String {
 }
 
 async fn reply_with(sock: &mut TcpStream, status: u16, body: &str) {
-    let head = format!(
+    reply_headed(sock, status, &[], body).await;
+}
+
+async fn reply_headed(sock: &mut TcpStream, status: u16, headers: &[(&str, &str)], body: &str) {
+    let mut head = format!(
         "HTTP/1.1 {status} S\r\n\
          content-type: application/json\r\n\
          content-length: {}\r\n\
-         connection: close\r\n\r\n",
+         connection: close\r\n",
         body.len()
     );
+    for (k, v) in headers {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("\r\n");
     sock.write_all(head.as_bytes()).await.unwrap();
     sock.write_all(body.as_bytes()).await.unwrap();
     sock.flush().await.unwrap();

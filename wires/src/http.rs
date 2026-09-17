@@ -7,8 +7,10 @@
 //! the provider's own words, clipped, and nothing of the request — the rule
 //! `providers.md` §5 states once and both wires obey.
 
+use std::time::Duration;
+
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use wire_secret::Secret;
 
 use crate::{Error, Headers, Result, tls};
@@ -84,7 +86,9 @@ pub(crate) fn key_header(wire: &'static str, key: &Secret, prefix: &str) -> Resu
 }
 
 /// Send the body, and turn a non-2xx into [`Error::Api`] carrying the
-/// **body's** message. The request never appears in the error.
+/// **body's** message. The request never appears in the error; the
+/// provider's request id and a 429's retry hint do, read off the response
+/// headers before the body is consumed.
 pub(crate) async fn post_json<B: Serialize + ?Sized>(
     http: &reqwest::Client,
     url: &reqwest::Url,
@@ -95,11 +99,40 @@ pub(crate) async fn post_json<B: Serialize + ?Sized>(
     if status.is_success() {
         return Ok(resp);
     }
+    let request_id = request_id(resp.headers());
+    let retry_after = retry_after(resp.headers());
     let text = resp.text().await.unwrap_or_default();
     Err(Error::Api {
         status: status.as_u16(),
         message: api_message(&text, status.as_u16()),
+        request_id,
+        retry_after,
     })
+}
+
+/// The provider's id for the exchange. Each wire spells the header its own
+/// way; the first one present wins, and none is a request id of `None`.
+fn request_id(headers: &HeaderMap) -> Option<String> {
+    ["x-typesafe-request-id", "request-id", "x-request-id"]
+        .into_iter()
+        .find_map(|name| headers.get(name))
+        .and_then(|v| v.to_str().ok())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// A 429's hint, the way TypeSafe's SDK reads it: `retry-after-ms` first,
+/// then `Retry-After` in whole seconds. The HTTP-date form of the latter is
+/// not parsed — nothing we speak sends it, and a wrong guess at a clock is
+/// worse than no hint.
+fn retry_after(headers: &HeaderMap) -> Option<Duration> {
+    let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if let Some(ms) = text("retry-after-ms").and_then(|s| s.trim().parse::<u64>().ok()) {
+        return Some(Duration::from_millis(ms));
+    }
+    text("retry-after")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
 }
 
 /// A 200 that is not an event stream must not become an empty stream.
@@ -129,33 +162,69 @@ pub(crate) async fn require_event_stream(resp: reqwest::Response) -> Result<reqw
 
 // -------------------------------------------------------------- the error body
 
-/// Both wires answer a failure the same way: `{"error": {"message": …}}`.
-#[derive(Debug, Deserialize)]
-struct ApiError {
-    error: ApiErrorBody,
-}
-
-#[derive(Debug, Deserialize)]
-struct ApiErrorBody {
-    #[serde(default)]
-    message: String,
-}
-
 /// What a non-2xx says, from the **body**. A body that is not the shape the
 /// wire promises (an HTML error page from a proxy, say) is clipped and passed
 /// through rather than swallowed — an operator debugging a gateway needs the
 /// first line of it.
 pub(crate) fn api_message(body: &str, status: u16) -> String {
-    if let Ok(e) = serde_json::from_str::<ApiError>(body)
-        && !e.error.message.is_empty()
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(body)
+        && let Some(message) = error_message(&v)
     {
-        return e.error.message;
+        return message;
     }
     let body = body.trim();
     if body.is_empty() {
         return format!("no body with the {status}");
     }
     clip(body)
+}
+
+/// The message inside an error body, across the shapes the wires answer
+/// with. OpenAI and Anthropic: `{"error": {"message": …}}`. TypeSafe:
+/// `{"detail": …}`, where `detail` is a string, an object with a `message`,
+/// or — on a 422 — an array of `{loc, msg}` validation errors, joined the way
+/// their SDK joins them so the two read the same in a log line.
+fn error_message(v: &serde_json::Value) -> Option<String> {
+    let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    if let Some(s) = v.get("error").and_then(|e| e.as_str()) {
+        return non_empty(s);
+    }
+    if let Some(s) = v.pointer("/error/message").and_then(|m| m.as_str()) {
+        return non_empty(s);
+    }
+    if let Some(s) = v.get("message").and_then(|m| m.as_str()) {
+        return non_empty(s);
+    }
+    let detail = v.get("detail")?;
+    if let Some(s) = detail.as_str() {
+        return non_empty(s);
+    }
+    if let Some(s) = detail.get("message").and_then(|m| m.as_str()) {
+        return non_empty(s);
+    }
+    let errors = detail.as_array()?;
+    let parts: Vec<String> = errors
+        .iter()
+        .filter_map(|e| {
+            let msg = e.get("msg")?.as_str()?;
+            let loc: Vec<&str> = e
+                .get("loc")
+                .and_then(|l| l.as_array())
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|x| x.as_str())
+                        .filter(|x| *x != "body")
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(if loc.is_empty() {
+                msg.to_string()
+            } else {
+                format!("{}: {msg}", loc.join("."))
+            })
+        })
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// Long bodies do not belong in an error that reaches a pane.
@@ -263,5 +332,65 @@ mod tests {
         assert_eq!(api_message("   ", 500), "no body with the 500");
         let long = "x".repeat(1000);
         assert_eq!(api_message(&long, 500).len(), 400 + "…".len());
+    }
+
+    #[test]
+    fn typesafes_detail_gives_up_its_message_in_each_of_its_shapes() {
+        // A plain string.
+        assert_eq!(
+            api_message(r#"{"detail":"Invalid API key"}"#, 401),
+            "Invalid API key"
+        );
+        // An object with a message.
+        assert_eq!(
+            api_message(r#"{"detail":{"message":"Overloaded","code":"busy"}}"#, 529),
+            "Overloaded"
+        );
+        // A 422's validation array, joined the way their SDK joins it, with
+        // the `body` root dropped from each path.
+        assert_eq!(
+            api_message(
+                r#"{"detail":[
+                    {"loc":["body","questions","tone","criteria"],"msg":"at least two levels","type":"value_error"},
+                    {"loc":["body","model"],"msg":"field required","type":"missing"},
+                    {"not":"a validation error"}
+                ]}"#,
+                422
+            ),
+            "questions.tone.criteria: at least two levels; model: field required"
+        );
+        // A body that is JSON but says nothing is passed through whole.
+        assert_eq!(api_message(r#"{"detail":[]}"#, 422), r#"{"detail":[]}"#);
+        assert_eq!(
+            api_message(r#"{"error":{"message":""}}"#, 500),
+            r#"{"error":{"message":""}}"#
+        );
+    }
+
+    #[test]
+    fn a_request_id_is_read_from_whichever_header_the_wire_uses() {
+        let mut h = HeaderMap::new();
+        assert_eq!(request_id(&h), None);
+        h.insert("x-request-id", HeaderValue::from_static("req_openai"));
+        assert_eq!(request_id(&h).as_deref(), Some("req_openai"));
+        h.insert("request-id", HeaderValue::from_static("req_anthropic"));
+        assert_eq!(request_id(&h).as_deref(), Some("req_anthropic"));
+        h.insert("x-typesafe-request-id", HeaderValue::from_static("req_ts"));
+        assert_eq!(request_id(&h).as_deref(), Some("req_ts"));
+    }
+
+    #[test]
+    fn retry_after_prefers_milliseconds_and_ignores_a_date() {
+        let mut h = HeaderMap::new();
+        assert_eq!(retry_after(&h), None);
+        h.insert(
+            "retry-after",
+            HeaderValue::from_static("Wed, 21 Oct 2026 07:28:00 GMT"),
+        );
+        assert_eq!(retry_after(&h), None);
+        h.insert("retry-after", HeaderValue::from_static("3"));
+        assert_eq!(retry_after(&h), Some(Duration::from_secs(3)));
+        h.insert("retry-after-ms", HeaderValue::from_static("250"));
+        assert_eq!(retry_after(&h), Some(Duration::from_millis(250)));
     }
 }

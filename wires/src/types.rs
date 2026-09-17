@@ -253,7 +253,7 @@ pub struct Chunk {
 /// What a client is, for a pane and a log line. Never a key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Info {
-    /// `openai`, `azure`, `anthropic`.
+    /// `openai`, `azure`, `anthropic`, `typesafe`.
     pub wire: &'static str,
     /// The model name, or the Azure deployment.
     pub model: String,
