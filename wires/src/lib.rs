@@ -1,6 +1,6 @@
 //! The LLM wires.
 //!
-//! Two traits, one set of types, one switch. A caller names a [`Wire`] and a
+//! Three traits, one set of types, one switch. A caller names a [`Wire`] and a
 //! key and gets back a `Box<dyn Provider>` that can be asked a question:
 //!
 //! ```no_run
@@ -39,11 +39,28 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Two traits and not one with more methods, because a deployment that
-//! judges cannot chat and one that chats cannot judge: a single interface
-//! would force every implementation to carry a method that always errors.
-//! The switch stays one — `Wire` names every wire — and the trait a wire
-//! speaks is decided at [`build`] or [`build_judge`], once.
+//! Or a `Box<dyn Embed>`, which turns a batch of texts into a vector each,
+//! in the order they went out:
+//!
+//! ```no_run
+//! # async fn go() -> llm_wires::Result<()> {
+//! use llm_wires::{EmbedRequest, Wire};
+//!
+//! let embed = llm_wires::build_embed(
+//!     Wire::openai("https://api.openai.com/v1", "text-embedding-3-small"),
+//!     Some(wire_secret::Secret::from("sk-…")),
+//! )?;
+//! let answer = embed.embed(EmbedRequest::of(["the first row", "the second"])).await?;
+//! assert_eq!(answer.vectors.len(), 2);
+//! # Ok(()) }
+//! ```
+//!
+//! Three traits and not one with more methods, because a deployment that
+//! judges cannot chat, one that chats cannot judge, and one that embeds does
+//! neither: a single interface would force every implementation to carry
+//! methods that always error. The switch stays one — `Wire` names every wire —
+//! and the trait a wire speaks is decided at [`build`], [`build_judge`] or
+//! [`build_embed`], once.
 //!
 //! ## What this crate is not
 //!
@@ -65,6 +82,7 @@
 //! which is what closes the connection. There is nothing to remember to call.
 
 mod anthropic;
+mod embedding;
 mod error;
 mod http;
 mod judgement;
@@ -83,6 +101,7 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use wire_secret::Secret;
 
+pub use embedding::{EmbedRequest, EmbedResponse};
 pub use error::{Error, Result};
 pub use judgement::{Answer, Judgement, Question, Verdict};
 pub use types::{
@@ -128,6 +147,23 @@ pub trait Judge: Send + Sync {
     fn info(&self) -> Info;
 }
 
+/// One deployment, asked for vectors.
+///
+/// Beside [`Provider`] and [`Judge`] and part of neither: a batch of texts
+/// goes out and one vector per text comes back, **in the order the texts went
+/// out**, and nothing in that is a turn. The model is the [`Wire`]'s, as it is
+/// for a chat client — and it matters more here, because a vector is only
+/// comparable with vectors from the same model, so an index is one model's and
+/// a request field would let a typo mix two of them.
+#[async_trait]
+pub trait Embed: Send + Sync {
+    /// The whole batch, vectorised.
+    async fn embed(&self, req: EmbedRequest) -> Result<EmbedResponse>;
+
+    /// What this client is, for a pane and a log line. Never a key.
+    fn info(&self) -> Info;
+}
+
 /// Extra headers sent on every request, in a stable order.
 ///
 /// Sorted rather than insertion-ordered so a request is the same bytes twice —
@@ -142,12 +178,16 @@ pub type Headers = BTreeMap<String, String>;
 /// `openrouter`, `anthropic`, `typesafe` — collapse onto these four; the
 /// mapping lives in `domains::llm`, one level up, where the card is. Three
 /// of them chat and are built with [`build`]; one judges and is built with
-/// [`build_judge`]. The enum is one so that the card keeps one switch.
+/// [`build_judge`]; the two that speak OpenAI's shape also embed, through
+/// [`build_embed`]. The enum is one so that the card keeps one switch, and
+/// which trait a wire speaks is settled at `build` rather than by a method
+/// that answers [`Error::Cannot`] for ever.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Wire {
-    /// `POST {endpoint}/chat/completions` with a bearer key. Serves OpenAI
-    /// itself, a local ollama, OpenRouter, and any gateway that speaks the
-    /// same shape.
+    /// `POST {endpoint}/chat/completions` with a bearer key, or
+    /// `POST {endpoint}/embeddings` when it is built with [`build_embed`].
+    /// Serves OpenAI itself, a local ollama, OpenRouter, and any gateway that
+    /// speaks the same shape.
     ///
     /// **The caller supplies the endpoint; there is no default here.** Go
     /// treated an empty endpoint as "the SDK's base URL" and filled
@@ -162,9 +202,10 @@ pub enum Wire {
         model: String,
         headers: Headers,
     },
-    /// The same body at Azure's URL: the deployment is in the path, the
+    /// The same bodies at Azure's URL: the deployment is in the path, the
     /// api-version in the query, and the key in `Api-Key` rather than
-    /// `Authorization`.
+    /// `Authorization`. Chat and embeddings both, the deployment saying which
+    /// the operator configured.
     Azure {
         endpoint: String,
         deployment: String,
@@ -319,6 +360,51 @@ pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
     }
 }
 
+/// The switch over wires that embed. OpenAI's shape and Azure's URL for it:
+/// Anthropic publishes no embeddings API of its own, and TypeSafe judges.
+///
+/// The key rule is [`build`]'s: `None` is refused, every wire authenticates.
+pub fn build_embed(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Embed>> {
+    let name = wire.name();
+    let key = key.ok_or(Error::NoKey(name))?;
+    match wire {
+        Wire::OpenAi {
+            endpoint,
+            model,
+            headers,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "model", &model)?;
+            Ok(Box::new(openai::Embeddings::openai(
+                &endpoint, &model, &headers, &key,
+            )?))
+        }
+        Wire::Azure {
+            endpoint,
+            deployment,
+            api_version,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "deployment", &deployment)?;
+            let version = if api_version.trim().is_empty() {
+                AZURE_DEFAULT_API_VERSION
+            } else {
+                api_version.trim()
+            };
+            Ok(Box::new(openai::Embeddings::azure(
+                &endpoint,
+                &deployment,
+                version,
+                &key,
+            )?))
+        }
+        Wire::Anthropic { .. } | Wire::TypeSafe { .. } => Err(Error::Cannot {
+            wire: name,
+            verb: "embed",
+        }),
+    }
+}
+
 fn require(wire: &'static str, field: &'static str, value: &str) -> Result<()> {
     if value.trim().is_empty() {
         return Err(Error::Missing { wire, field });
@@ -354,6 +440,13 @@ mod tests {
             Err(Error::NoKey(got)) => assert_eq!(got, "typesafe"),
             other => panic!("typesafe: expected NoKey, got {:?}", other.err()),
         }
+        match build_embed(
+            Wire::openai("https://api.openai.com/v1", "text-embedding-3-small"),
+            None,
+        ) {
+            Err(Error::NoKey(got)) => assert_eq!(got, "openai"),
+            other => panic!("openai embeddings: expected NoKey, got {:?}", other.err()),
+        }
     }
 
     #[test]
@@ -384,6 +477,18 @@ mod tests {
                 other => panic!("{name}: expected Cannot, got {:?}", other.err()),
             }
         }
+        // And the third trait keeps the same shape: the wires that do not
+        // publish an embeddings endpoint say so once, at build.
+        for wire in [
+            Wire::anthropic("https://api.anthropic.com", "claude-sonnet-4"),
+            Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+        ] {
+            let name = wire.name();
+            match build_embed(wire, Some(Secret::from("k"))) {
+                Err(Error::Cannot { wire, verb }) => assert_eq!((wire, verb), (name, "embed")),
+                other => panic!("{name}: expected Cannot, got {:?}", other.err()),
+            }
+        }
         assert_eq!(
             Error::Cannot {
                 wire: "typesafe",
@@ -391,6 +496,14 @@ mod tests {
             }
             .to_string(),
             "the typesafe wire cannot chat"
+        );
+        assert_eq!(
+            Error::Cannot {
+                wire: "anthropic",
+                verb: "embed"
+            }
+            .to_string(),
+            "the anthropic wire cannot embed"
         );
     }
 
@@ -458,13 +571,24 @@ mod tests {
             ),
         ];
         for (wire, want) in cases {
-            let got = match wire {
-                Wire::TypeSafe { .. } => build_judge(wire, Some(Secret::from("k"))).map(|_| ()),
-                _ => build(wire, Some(Secret::from("k"))).map(|_| ()),
+            // Every door the wire has: an empty endpoint is a card nobody
+            // resolved whichever trait it was built for, so each build that
+            // accepts this wire must refuse it by the same field name.
+            let doors: Vec<Result<()>> = match wire {
+                Wire::TypeSafe { .. } => vec![build_judge(wire, Some(Secret::from("k"))).map(drop)],
+                // Anthropic has one door here; the two that speak OpenAI's
+                // shape have both, and the field is refused on each.
+                Wire::Anthropic { .. } => vec![build(wire, Some(Secret::from("k"))).map(drop)],
+                _ => vec![
+                    build(wire.clone(), Some(Secret::from("k"))).map(drop),
+                    build_embed(wire, Some(Secret::from("k"))).map(drop),
+                ],
             };
-            match got {
-                Err(Error::Missing { field, .. }) => assert_eq!(field, want),
-                other => panic!("expected Missing {want}, got {:?}", other.err()),
+            for got in doors {
+                match got {
+                    Err(Error::Missing { field, .. }) => assert_eq!(field, want),
+                    other => panic!("expected Missing {want}, got {:?}", other.err()),
+                }
             }
         }
     }

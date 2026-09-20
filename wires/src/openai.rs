@@ -10,12 +10,19 @@
 //! their types on a schedule that is not ours. The mapping is Go's
 //! `openai/convert.go` and `openai/stream.go`, ported.
 //!
+//! `/v1/embeddings` is beside this file rather than in it, in `embeddings.rs`:
+//! the same host and the same key, a different interface — an embedding
+//! deployment cannot chat — so it is an [`Embed`](crate::Embed) client built
+//! by [`build_embed`](crate::build_embed) and never a method here.
+//!
 //! Not here, and deliberately: `/v1/responses` (a second wire, and the newest
-//! models need it — a later ticket), and `/v1/embeddings` (a different
-//! interface entirely; an embedding deployment cannot chat).
+//! models need it — a later ticket).
 
 mod convert;
+mod embeddings;
 mod stream;
+
+pub(crate) use embeddings::Embeddings;
 
 use async_trait::async_trait;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName};

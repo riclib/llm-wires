@@ -3,7 +3,8 @@
 One `Provider` trait over the **Anthropic** and **OpenAI** HTTP shapes — tools,
 streaming, and a key that cannot accidentally be printed — and beside it a
 `Judge` trait over **TypeSafe**'s System One, for typed questions with
-calibrated answers.
+calibrated answers, and an `Embed` trait over the OpenAI embeddings shape, for
+text turned into vectors.
 
 ```rust
 use llm_wires::{ChatRequest, Wire};
@@ -99,6 +100,40 @@ match &verdict.answers["department"] {
   wire.
 - Read from the published SDK (`@typesafe-ai/sdk` 0.6.0) rather than the
   docs' prose, where the two differ.
+
+## `Embed`: vectors
+
+An embedding deployment does not chat either, so it is a third trait behind the
+same `Wire` switch. A batch of texts goes out and one vector per text comes
+back, **in the order the texts went out** — the wire obeys the `index` each row
+carries rather than trusting the array's order, because the caller is about to
+pair these with its own rows by position and store them in a fixed-width
+column, where an answer that is nearly right is worse than no answer. A row
+missing, a row twice, a row for an input that was not sent, or a width that
+disagrees with the rest is an `Error::Decode` that names which. The model is
+the client's, as everywhere else in this crate, and here it matters most: a
+vector is only comparable with vectors from the same model, so an index belongs
+to one model and a request field would let a typo mix two of them.
+
+```rust
+use llm_wires::{EmbedRequest, Wire};
+
+let embed = llm_wires::build_embed(
+    Wire::openai("https://api.openai.com/v1", "text-embedding-3-small"),
+    Some(wire_secret::Secret::from("sk-…")),
+)?;
+let answer = embed.embed(EmbedRequest::of(["the first row", "the second"])).await?;
+assert_eq!(answer.vectors.len(), 2);          // one per input, same order
+assert_eq!(answer.usage.output, 0);           // embeddings bill the input side
+```
+
+`dimensions` is optional and omitted from the body when nothing asked for it,
+so a gateway that has never heard of the field is not handed it; the request
+names `encoding_format: "float"` because the vendor SDKs ask for base64 and
+this wire decodes floats. An empty batch, an empty text in one, or a width of
+zero is refused before the socket, naming the row — a server's 400 about a
+batch of two thousand is not a sentence anybody can act on. Azure embeddings
+are the same wire at Azure's URL, the deployment in the path.
 
 ## `wire-secret`
 
