@@ -1,6 +1,6 @@
 [package]
 name = "llm-wires"
-version = "0.2.2"
+version = "0.2.3"
 readme = "../README.md"
 description = "The LLM wires: a Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming, a Judge trait over TypeSafe's, and an Embed trait over the OpenAI embeddings shape"
 keywords = ["llm", "anthropic", "openai", "typesafe", "streaming"]
@@ -31,5 +31,9 @@ llm-wires = { path = ".", features = ["test-support"] }
 anyhow.workspace = true
 rcgen.workspace = true
 tempfile.workspace = true
+# Not used by a test directly: turned on so every test here runs with the
+# number representation a binary that unifies on it gets (solid does, through
+# starlark), which an untagged enum over `Vec<f32>` once could not decode.
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 tokio-rustls.workspace = true

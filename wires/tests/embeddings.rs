@@ -217,6 +217,46 @@ async fn a_200_that_is_short_a_vector_is_an_error_and_not_a_hole() {
     }
 }
 
+#[tokio::test]
+async fn plain_floats_decode_with_serde_json_arbitrary_precision_on() {
+    // A binary that depends on this crate may turn on `serde_json`'s
+    // `arbitrary_precision` — solid does, through starlark — and features
+    // unify per build, so the decode must not depend on how serde_json holds
+    // a number. This crate's dev-dependencies turn the feature on so every
+    // test here runs as such a binary does. The body is the shape
+    // `text-embedding-3-small` answers: 1,536 floats, signed, some in
+    // exponent form, one a bare integer.
+    let width = 1536;
+    let floats: Vec<String> = (0..width)
+        .map(|i| match i % 4 {
+            0 => format!("-0.{:04}", i + 1),
+            1 => format!("{}.5e-05", i % 9 + 1),
+            2 => "0".to_string(),
+            _ => format!("0.{:04}", i + 1),
+        })
+        .collect();
+    let body = format!(
+        r#"{{"object":"list","model":"text-embedding-3-small","data":[{{"object":"embedding","index":0,"embedding":[{}]}}],"usage":{{"prompt_tokens":3,"total_tokens":3}}}}"#,
+        floats.join(",")
+    );
+    let f = fixture(Reply::Json(Box::leak(body.into_boxed_str()))).await;
+    let embed = llm_wires::build_embed(
+        Wire::openai(f.endpoint(), "text-embedding-3-small"),
+        Some(Secret::from("sk-test-key")),
+    )
+    .unwrap();
+
+    let answer = embed
+        .embed(EmbedRequest::one("a row"))
+        .await
+        .expect("a reply of plain floats decodes");
+    assert_eq!(answer.dimensions(), Some(width));
+    assert_eq!(answer.vectors[0][0], -0.0001);
+    assert_eq!(answer.vectors[0][1], 2.5e-5);
+    assert_eq!(answer.vectors[0][2], 0.0);
+    assert_eq!(answer.vectors[0][3], 0.0004);
+}
+
 // -------------------------------------------------------------- the bodies
 
 const ONE: &str = r#"{

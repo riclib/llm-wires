@@ -188,14 +188,69 @@ struct Row {
     embedding: WireEmbedding,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
+/// One row's `embedding`, as whichever shape the server sent.
+///
+/// Decoded by hand and not as `#[serde(untagged)]`: an untagged enum buffers
+/// the value through serde's private `Content` first, and in a binary where
+/// `serde_json`'s `arbitrary_precision` is on — features unify per build, and
+/// any dependency may turn it on — a number buffers as a map, so `Vec<f32>`
+/// matched nothing and every vector failed to parse. Here the tokens go
+/// straight from the reader to `f32`, which is the same with the feature on
+/// or off.
+#[derive(Debug)]
 enum WireEmbedding {
     Floats(Vec<f32>),
     /// A server that ignored `encoding_format` and packed the floats little-
     /// endian into base64. Its own arm so the operator is told exactly that,
     /// rather than reading serde's "invalid type: string".
     Packed(String),
+}
+
+impl<'de> Deserialize<'de> for WireEmbedding {
+    fn deserialize<D>(d: D) -> std::result::Result<WireEmbedding, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        d.deserialize_any(EmbeddingVisitor)
+    }
+}
+
+struct EmbeddingVisitor;
+
+impl<'de> serde::de::Visitor<'de> for EmbeddingVisitor {
+    type Value = WireEmbedding;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("an array of numbers, or a base64 string")
+    }
+
+    /// Each element as an `f32`, which takes a float or an integer token.
+    fn visit_seq<A>(self, mut seq: A) -> std::result::Result<WireEmbedding, A::Error>
+    where
+        A: serde::de::SeqAccess<'de>,
+    {
+        // The hint is the server's to give; it sizes the allocation only up
+        // to a width no model has, so a lying one cannot ask for gigabytes.
+        let mut floats = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(16_384));
+        while let Some(x) = seq.next_element::<f32>()? {
+            floats.push(x);
+        }
+        Ok(WireEmbedding::Floats(floats))
+    }
+
+    fn visit_str<E>(self, s: &str) -> std::result::Result<WireEmbedding, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(WireEmbedding::Packed(s.to_string()))
+    }
+
+    fn visit_string<E>(self, s: String) -> std::result::Result<WireEmbedding, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(WireEmbedding::Packed(s))
+    }
 }
 
 impl Default for WireEmbedding {
