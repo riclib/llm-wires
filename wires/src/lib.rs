@@ -136,8 +136,8 @@ use wire_secret::Secret;
 pub use embedding::{EmbedRequest, EmbedResponse};
 pub use error::{Error, Result};
 pub use extraction::{
-    DurationUnit, Extracted, Extraction, Fact, Field, FieldType, Image, Interval, Item, ListItem,
-    Point, Scale, Span, Step,
+    Distribution, DurationUnit, Extracted, Extraction, Fact, Field, FieldType, Image, Interval,
+    Item, ListItem, Point, Scale, Span, Step,
 };
 pub use judgement::{Answer, Judgement, Question, Verdict};
 pub use types::{

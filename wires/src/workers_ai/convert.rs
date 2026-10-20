@@ -20,7 +20,10 @@ use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::extraction::{FieldType, Image, Point, Scale, Step};
-use crate::{Error, Extracted, Extraction, Fact, Field, Item, ListItem, Result, Span, Usage, http};
+use crate::{
+    Distribution, Error, Extracted, Extraction, Fact, Field, Item, ListItem, Result, Span, Usage,
+    http,
+};
 
 use super::WIRE;
 
@@ -445,41 +448,53 @@ fn fact(name: &str, field: &Field, got: &Map<String, Value>) -> Result<Fact> {
                 confidence: a.opt("confidence", number)?,
             }
         }
-        FieldType::Estimate { min, .. } => {
-            let p = |v: &Value| point(min, v);
-            Fact::Estimate {
-                value: a.req("value", p)?,
-                median: a.req("median", p)?,
-                mean: a.opt("mean", p)?,
-                p10: a.req("p10", p)?,
-                p90: a.req("p90", p)?,
-                p_below: a.req("p_below", number)?,
-                p_above: a.req("p_above", number)?,
-                quantiles: a.opt("quantiles", |v| array(v, p))?.unwrap_or_default(),
-            }
-        }
-        FieldType::Forecast { min, .. } => {
-            let steps = |v: &Value| array(v, |x| point(min, x));
-            let value: Vec<Point> = a.req("value", steps)?;
-            let median = a.req("median", steps)?;
-            let p10 = a.req("p10", steps)?;
-            let p90 = a.req("p90", steps)?;
-            if [median.len(), p10.len(), p90.len()] != [value.len(); 3] {
+        FieldType::Estimate { min, .. } => Fact::Estimate(distribution(&a, min)?),
+        FieldType::Forecast { min, horizon, .. } => {
+            let steps = a.req("steps", |v| v.as_array().cloned())?;
+            // A forecast short of its horizon would bind fewer rows than the
+            // caller asked for, with nothing to say which went missing.
+            if steps.len() != usize::from(*horizon) {
                 return Err(Error::Decode(format!(
-                    "forecast answer for {name:?} has {} values and {}, {} and {} of median, p10 and p90",
-                    value.len(),
-                    median.len(),
-                    p10.len(),
-                    p90.len()
+                    "forecast answer for {name:?} has {} steps for a horizon of {horizon}",
+                    steps.len()
                 )));
             }
-            Fact::Forecast {
-                value,
-                median,
-                p10,
-                p90,
+            let mut out = Vec::with_capacity(steps.len());
+            for (i, step) in steps.iter().enumerate() {
+                let label = format!("{name} step {i}");
+                let Some(got) = step.as_object() else {
+                    return Err(Error::Decode(format!(
+                        "field {label:?} is not an object: {}",
+                        http::clip(&step.to_string())
+                    )));
+                };
+                out.push(distribution(
+                    &Answer {
+                        name: &label,
+                        kind,
+                        got,
+                    },
+                    min,
+                )?);
             }
+            Fact::Forecast { steps: out }
         }
+    })
+}
+
+/// An estimate's numbers, or one forecast step's, as points of the kind the
+/// field's `min` was.
+fn distribution(a: &Answer<'_>, min: &Point) -> Result<Distribution> {
+    let p = |v: &Value| point(min, v);
+    Ok(Distribution {
+        value: a.req("value", p)?,
+        median: a.req("median", p)?,
+        mean: a.opt("mean", p)?,
+        p10: a.req("p10", p)?,
+        p90: a.req("p90", p)?,
+        p_below: a.req("p_below", number)?,
+        p_above: a.req("p_above", number)?,
+        quantiles: a.opt("quantiles", |v| array(v, p))?,
     })
 }
 
@@ -678,6 +693,33 @@ mod tests {
             body["options"],
             json!({"include_quantiles": true, "return_state_text": true})
         );
+    }
+
+    #[test]
+    fn quantiles_are_kept_when_sent_and_none_when_not() {
+        let req = Extraction::of("x").field("d", FieldType::estimate(0, 10));
+        let reply = |q: &str| {
+            format!(
+                r#"{{"result":{{"answers":{{"d":{{"type":"estimate","value":5,"median":5,"p10":2,"p90":8,"p_below":0,"p_above":0{q}}}}}}},"success":true}}"#
+            )
+        };
+        let got = response(&reply(r#","quantiles":[1,5,9]"#), 200, &req).unwrap();
+        let Fact::Estimate(d) = &got.answers["d"] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(
+            d.quantiles,
+            Some(vec![
+                Point::Number(1.0),
+                Point::Number(5.0),
+                Point::Number(9.0)
+            ])
+        );
+        let got = response(&reply(""), 200, &req).unwrap();
+        let Fact::Estimate(d) = &got.answers["d"] else {
+            panic!("{got:?}")
+        };
+        assert_eq!(d.quantiles, None);
     }
 
     #[test]

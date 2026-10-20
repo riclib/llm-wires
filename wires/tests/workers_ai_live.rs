@@ -101,10 +101,60 @@ async fn the_posts_email_answers_701_10_and_no_tracking_number() {
     let tracking = &got.answers["tracking_number"];
     assert!(tracking.is_null(), "{tracking:?}");
     match &got.answers["repair_cost"] {
-        Fact::Estimate { p10, p90, .. } => {
-            assert!(p10.as_f64().unwrap() <= p90.as_f64().unwrap());
+        Fact::Estimate(d) => {
+            assert!(d.p10.as_f64().unwrap() <= d.p90.as_f64().unwrap());
+            assert_eq!(d.quantiles, None);
         }
         other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore = "spends money; needs CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_AUTH_TOKEN"]
+async fn a_forecast_is_a_distribution_per_step_with_quantiles_when_asked() {
+    let extract = llm_wires::build_extract(
+        Wire::workers_ai(ENDPOINT, env("CLOUDFLARE_ACCOUNT_ID"), MODEL),
+        Some(Secret::from(env("CLOUDFLARE_AUTH_TOKEN").as_str())),
+    )
+    .unwrap();
+    let mut req = Extraction::of(
+        "Monthly visitors: Jan 100, Feb 110, Mar 121, Apr 133. Forecast May and June.",
+    )
+    .field(
+        "visitors",
+        FieldType::Forecast {
+            horizon: 2,
+            interval: Some(llm_wires::Interval::Month),
+            min: 50.into(),
+            max: 500.into(),
+            scale: llm_wires::Scale::Linear,
+            unit: None,
+        },
+    );
+    req.quantiles = true;
+    let got = extract
+        .extract(req)
+        .await
+        .expect("the real server forecasts");
+    let Fact::Forecast { steps } = &got.answers["visitors"] else {
+        panic!("{:?}", got.answers["visitors"]);
+    };
+    for (i, d) in steps.iter().enumerate() {
+        println!(
+            "step {i}: median {:?}, p10 {:?}, p90 {:?}, tails {}/{}, {} quantiles",
+            d.median,
+            d.p10,
+            d.p90,
+            d.p_below,
+            d.p_above,
+            d.quantiles.as_ref().map_or(0, Vec::len)
+        );
+    }
+    assert_eq!(steps.len(), 2);
+    for d in steps {
+        let (lo, hi) = (d.p10.as_f64().unwrap(), d.p90.as_f64().unwrap());
+        assert!(lo <= d.median.as_f64().unwrap() && d.median.as_f64().unwrap() <= hi);
+        assert_eq!(d.quantiles.as_ref().map(Vec::len), Some(99));
     }
 }
 

@@ -425,30 +425,37 @@ pub enum Fact {
         /// Not always sent.
         confidence: Option<f64>,
     },
-    Estimate {
-        /// The point the model would pick.
-        value: Point,
-        median: Point,
-        /// Not always sent.
-        mean: Option<Point>,
-        /// The 80% interval.
-        p10: Point,
-        p90: Point,
-        /// The mass the model put below `min` and above `max`.
-        p_below: f64,
-        p_above: f64,
-        /// 99 percentiles, when [`Extraction::quantiles`] asked for them.
-        quantiles: Vec<Point>,
-    },
-    /// One entry per step, in order, in each array. The server also sends
-    /// a `steps` array of whole estimates, each with its own `p_below`,
-    /// `p_above` and, when asked, quantiles; those are not read here yet.
+    Estimate(Distribution),
+    /// One distribution per step, in order: a row per step is how a caller
+    /// binds a forecast. Read from the reply's `steps`, which carries every
+    /// step whole; the parallel `value`/`median`/`p10`/`p90` arrays the
+    /// server also sends are those same numbers, and are not read.
     Forecast {
-        value: Vec<Point>,
-        median: Vec<Point>,
-        p10: Vec<Point>,
-        p90: Vec<Point>,
+        steps: Vec<Distribution>,
     },
+}
+
+/// What the model believes about a value the input does not determine: an
+/// estimate's one, and each step of a forecast.
+///
+/// Every point is the kind the field's `min` was, a number or a date.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Distribution {
+    /// The point the model would pick.
+    pub value: Point,
+    pub median: Point,
+    /// Not always sent.
+    pub mean: Option<Point>,
+    /// The 80% interval.
+    pub p10: Point,
+    pub p90: Point,
+    /// The mass the model put below the field's `min` and above its `max`.
+    pub p_below: f64,
+    pub p_above: f64,
+    /// 99 percentiles, when [`Extraction::quantiles`] asked for them; `None`
+    /// when it did not. Points and not `f64`, because an estimate of a date
+    /// has dates for percentiles.
+    pub quantiles: Option<Vec<Point>>,
 }
 
 impl Fact {

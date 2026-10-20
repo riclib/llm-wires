@@ -171,7 +171,9 @@ The nine field types are the schema's — text, number, date, time, datetime,
 duration, list, estimate, forecast — each with its own options. A scalar
 answer carries `value`, the `guess` it would have made when `value` is `null`,
 `p_null` and a `confidence`; text carries its character span in the state;
-an estimate is a median and an 80% interval; a forecast is one entry per step.
+an estimate is a `Distribution` — a median, an 80% interval, the tails past
+the bounds, and the 99 percentiles when asked; a forecast is one
+`Distribution` per step, a row each.
 An answer of another type, or a value of the wrong JSON kind, is an
 `Error::Decode` that names the field — never coerced. The request is sorted,
 so it is the same bytes twice. Cloudflare's `{result, success, errors}`

@@ -12,8 +12,8 @@ use std::collections::BTreeMap;
 
 use llm_wires::testing::{Reply, fixture};
 use llm_wires::{
-    DurationUnit, Error, Extraction, Fact, Field, FieldType, Image, Interval, Item, ListItem,
-    Point, Scale, Step, Usage, Wire,
+    Distribution, DurationUnit, Error, Extraction, Fact, Field, FieldType, Image, Interval, Item,
+    ListItem, Point, Scale, Step, Usage, Wire,
 };
 use wire_secret::Secret;
 
@@ -298,7 +298,7 @@ async fn the_model_pages_invoice_decodes_an_estimate_and_a_list_with_confidence(
 
     assert_eq!(
         got.answers["days_to_pay"],
-        Fact::Estimate {
+        Fact::Estimate(Distribution {
             value: Point::Number(30.0),
             median: Point::Number(30.0),
             mean: Some(Point::Number(29.535)),
@@ -306,8 +306,10 @@ async fn the_model_pages_invoice_decodes_an_estimate_and_a_list_with_confidence(
             p90: Point::Number(38.0),
             p_below: 5.9e-06,
             p_above: 1.2e-05,
-            quantiles: vec![],
-        }
+            // Not asked for, so not there — rather than an empty list that
+            // reads as "asked, and the model had none".
+            quantiles: None,
+        })
     );
     assert_eq!(
         got.answers["contacts"],
@@ -375,23 +377,87 @@ async fn a_receipt_decodes_datetimes_and_whole_numbers() {
 }
 
 #[tokio::test]
-async fn a_forecast_is_one_entry_per_step_in_each_array() {
+async fn a_forecast_is_one_distribution_per_step_read_from_steps() {
     let f = fixture(Reply::Json(FORECAST)).await;
-    let req = Extraction::of("Daily number of people screened…")
-        .field("travelers", FieldType::forecast(1, 500_000, 4_000_000));
+    let req = Extraction::of(
+        "Monthly visitors: Jan 100, Feb 110, Mar 121, Apr 133. Forecast May and June.",
+    )
+    .field(
+        "visitors",
+        FieldType::Forecast {
+            horizon: 2,
+            interval: Some(Interval::Month),
+            min: 50.into(),
+            max: 500.into(),
+            scale: Scale::Linear,
+            unit: None,
+        },
+    );
     let got = extractor(f.endpoint_at("/client/v4"))
         .extract(req)
         .await
         .unwrap();
     assert_eq!(
-        got.answers["travelers"],
+        got.answers["visitors"],
         Fact::Forecast {
-            value: vec![Point::Number(2416117.0)],
-            median: vec![Point::Number(2419283.0)],
-            p10: vec![Point::Number(2270774.0)],
-            p90: vec![Point::Number(2556769.0)],
+            steps: vec![
+                Distribution {
+                    value: Point::Number(142.05750669804627),
+                    median: Point::Number(142.84137944665136),
+                    mean: Some(Point::Number(142.05750669804627)),
+                    p10: Point::Number(129.6380588565899),
+                    p90: Point::Number(155.4278487495318),
+                    p_below: 0.00002494963882782031,
+                    p_above: 0.000006810400009271689,
+                    quantiles: None,
+                },
+                Distribution {
+                    value: Point::Number(146.9222837927942),
+                    median: Point::Number(147.46636735096098),
+                    mean: Some(Point::Number(146.9222837927942)),
+                    p10: Point::Number(124.87035214217329),
+                    p90: Point::Number(167.32423492285832),
+                    p_below: 0.00001998953848669771,
+                    p_above: 0.000006182810011523543,
+                    quantiles: None,
+                },
+            ],
         }
     );
+    assert_eq!(got.usage.input, 258);
+}
+
+#[tokio::test]
+async fn a_forecast_short_of_its_horizon_or_without_steps_is_refused() {
+    let cases = [
+        // The launch post's shape: the parallel arrays and no `steps`. The
+        // live server sends both; the arrays alone are not enough to bind a
+        // row per step with its tails.
+        (
+            r#"{"result":{"model":"clairic","answers":{"travelers":{"type":"forecast","value":[2416117],"median":[2419283],"p10":[2270774],"p90":[2556769]}},"truncated":false,"usage":{"input_tokens":1,"output_tokens":0}},"success":true,"errors":[],"messages":[]}"#,
+            1,
+            r#"forecast answer for "travelers" has no steps"#,
+        ),
+        (
+            r#"{"result":{"model":"clairic","answers":{"travelers":{"type":"forecast","steps":[{"value":1,"median":1,"p10":0,"p90":2,"p_below":0,"p_above":0}]}},"truncated":false,"usage":{"input_tokens":1,"output_tokens":0}},"success":true,"errors":[],"messages":[]}"#,
+            2,
+            r#"has 1 steps for a horizon of 2"#,
+        ),
+        // A step missing a statistic names the step.
+        (
+            r#"{"result":{"model":"clairic","answers":{"travelers":{"type":"forecast","steps":[{"value":1,"median":1,"p90":2,"p_below":0,"p_above":0}]}},"truncated":false,"usage":{"input_tokens":1,"output_tokens":0}},"success":true,"errors":[],"messages":[]}"#,
+            1,
+            r#"forecast answer for "travelers step 0" has no p10"#,
+        ),
+    ];
+    for (body, horizon, want) in cases {
+        let f = fixture(Reply::Json(body)).await;
+        let req = Extraction::of("x").field("travelers", FieldType::forecast(horizon, 0, 10));
+        match extractor(f.endpoint_at("/client/v4")).extract(req).await {
+            Err(Error::Decode(why)) => assert!(why.contains(want), "{why}\nwanted {want}"),
+            other => panic!("expected Decode {want:?}, got {other:?}"),
+        }
+    }
 }
 
 #[tokio::test]
@@ -561,22 +627,8 @@ const RECEIPT: &str = r#"{
   "messages": []
 }"#;
 
-/// The launch post's TSA forecast, in the REST envelope, with the `steps`
-/// array the live server sends beside the parallel arrays (recorded
-/// 2026-10-20, where the post shows only the arrays and the schema only
-/// names `steps`). The arrays are what the wire reads; `steps` is here so
-/// that a reply carrying both is pinned to decode.
-const FORECAST: &str = r#"{
-  "result": {
-    "model": "clairic",
-    "answers": {
-      "travelers": {"type": "forecast", "value": [2416117], "median": [2419283], "p10": [2270774], "p90": [2556769],
-        "steps": [{"value": 2416117, "mean": 2416117, "median": 2419283, "p10": 2270774, "p90": 2556769, "p_below": 2.6e-05, "p_above": 6.5e-06}]}
-    },
-    "truncated": false,
-    "usage": {"input_tokens": 3000, "output_tokens": 0}
-  },
-  "success": true,
-  "errors": [],
-  "messages": []
-}"#;
+/// A live forecast, recorded 2026-10-20 against the request in
+/// [`a_forecast_is_one_distribution_per_step_read_from_steps`], byte for byte.
+/// The server sends the post's parallel arrays and the schema's `steps`
+/// together; the wire reads `steps`.
+const FORECAST: &str = r#"{"result":{"model":"clairic","answers":{"visitors":{"type":"forecast","value":[142.05750669804627,146.9222837927942],"median":[142.84137944665136,147.46636735096098],"p10":[129.6380588565899,124.87035214217329],"p90":[155.4278487495318,167.32423492285832],"steps":[{"value":142.05750669804627,"mean":142.05750669804627,"median":142.84137944665136,"p10":129.6380588565899,"p90":155.4278487495318,"p_below":0.00002494963882782031,"p_above":0.000006810400009271689},{"value":146.9222837927942,"mean":146.9222837927942,"median":147.46636735096098,"p10":124.87035214217329,"p90":167.32423492285832,"p_below":0.00001998953848669771,"p_above":0.000006182810011523543}]}},"truncated":false,"usage":{"state_tokens":32,"image_tokens":0,"schema_tokens":226,"input_tokens":258,"output_tokens":0,"passes":1}},"success":true,"errors":[],"messages":[]}"#;
