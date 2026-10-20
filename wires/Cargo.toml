@@ -1,8 +1,8 @@
 [package]
 name = "llm-wires"
-version = "0.2.3"
+version = "0.3.0"
 readme = "../README.md"
-description = "The LLM wires: a Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming, a Judge trait over TypeSafe's, and an Embed trait over the OpenAI embeddings shape"
+description = "The LLM wires: a Provider trait over the Anthropic and OpenAI HTTP shapes, with tools and streaming, a Judge trait over TypeSafe's, an Embed trait over the OpenAI embeddings shape, and an Extract trait over Cloudflare Workers AI's Clairic"
 keywords = ["llm", "anthropic", "openai", "typesafe", "streaming"]
 categories = ["api-bindings", "asynchronous"]
 edition.workspace = true

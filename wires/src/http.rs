@@ -1,4 +1,4 @@
-//! The HTTP both wires share: the URL, the client, the headers, and what a
+//! The HTTP every wire shares: the URL, the client, the headers, and what a
 //! non-2xx says.
 //!
 //! One seat each, because the rules here are the crate's and not a wire's. An
@@ -112,13 +112,21 @@ pub(crate) async fn post_json<B: Serialize + ?Sized>(
 
 /// The provider's id for the exchange. Each wire spells the header its own
 /// way; the first one present wins, and none is a request id of `None`.
+/// Cloudflare has no request id of its own and `cf-ray` is what its support
+/// asks for, so it is last: behind a Cloudflare-fronted provider that has
+/// its own, the provider's wins.
 fn request_id(headers: &HeaderMap) -> Option<String> {
-    ["x-typesafe-request-id", "request-id", "x-request-id"]
-        .into_iter()
-        .find_map(|name| headers.get(name))
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    [
+        "x-typesafe-request-id",
+        "request-id",
+        "x-request-id",
+        "cf-ray",
+    ]
+    .into_iter()
+    .find_map(|name| headers.get(name))
+    .and_then(|v| v.to_str().ok())
+    .filter(|s| !s.is_empty())
+    .map(str::to_string)
 }
 
 /// A 429's hint, the way TypeSafe's SDK reads it: `retry-after-ms` first,
@@ -183,9 +191,26 @@ pub(crate) fn api_message(body: &str, status: u16) -> String {
 /// with. OpenAI and Anthropic: `{"error": {"message": …}}`. TypeSafe:
 /// `{"detail": …}`, where `detail` is a string, an object with a `message`,
 /// or — on a 422 — an array of `{loc, msg}` validation errors, joined the way
-/// their SDK joins them so the two read the same in a log line.
+/// their SDK joins them so the two read the same in a log line. Cloudflare:
+/// `{"errors": [{"code": …, "message": …}], "success": false}`, each entry
+/// with its code, joined.
 fn error_message(v: &serde_json::Value) -> Option<String> {
     let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
+    if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
+        let parts: Vec<String> = errors
+            .iter()
+            .filter_map(|e| {
+                let msg = e.get("message")?.as_str().filter(|m| !m.is_empty())?;
+                Some(match e.get("code").filter(|c| !c.is_null()) {
+                    Some(code) => format!("{msg} (code {code})"),
+                    None => msg.to_string(),
+                })
+            })
+            .collect();
+        if !parts.is_empty() {
+            return Some(parts.join("; "));
+        }
+    }
     if let Some(s) = v.get("error").and_then(|e| e.as_str()) {
         return non_empty(s);
     }
@@ -368,9 +393,34 @@ mod tests {
     }
 
     #[test]
+    fn cloudflares_errors_give_up_each_message_with_its_code() {
+        assert_eq!(
+            api_message(
+                r#"{"result":null,"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[]}"#,
+                401
+            ),
+            "Authentication error (code 10000)"
+        );
+        assert_eq!(
+            api_message(
+                r#"{"success":false,"errors":[{"code":5006,"message":"fields: required"},{"message":"and another"},{"code":1}]}"#,
+                400
+            ),
+            "fields: required (code 5006); and another"
+        );
+        // An empty list says nothing and the body passes through.
+        assert_eq!(
+            api_message(r#"{"success":false,"errors":[]}"#, 500),
+            r#"{"success":false,"errors":[]}"#
+        );
+    }
+
+    #[test]
     fn a_request_id_is_read_from_whichever_header_the_wire_uses() {
         let mut h = HeaderMap::new();
         assert_eq!(request_id(&h), None);
+        h.insert("cf-ray", HeaderValue::from_static("8f1d2c3b4a5e6f70-LIS"));
+        assert_eq!(request_id(&h).as_deref(), Some("8f1d2c3b4a5e6f70-LIS"));
         h.insert("x-request-id", HeaderValue::from_static("req_openai"));
         assert_eq!(request_id(&h).as_deref(), Some("req_openai"));
         h.insert("request-id", HeaderValue::from_static("req_anthropic"));

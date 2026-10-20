@@ -1,6 +1,6 @@
 //! The LLM wires.
 //!
-//! Three traits, one set of types, one switch. A caller names a [`Wire`] and a
+//! Four traits, one set of types, one switch. A caller names a [`Wire`] and a
 //! key and gets back a `Box<dyn Provider>` that can be asked a question:
 //!
 //! ```no_run
@@ -55,12 +55,42 @@
 //! # Ok(()) }
 //! ```
 //!
-//! Three traits and not one with more methods, because a deployment that
-//! judges cannot chat, one that chats cannot judge, and one that embeds does
-//! neither: a single interface would force every implementation to carry
-//! methods that always error. The switch stays one — `Wire` names every wire —
-//! and the trait a wire speaks is decided at [`build`], [`build_judge`] or
-//! [`build_embed`], once.
+//! Or, on Cloudflare's Workers AI, a `Box<dyn Extract>` that reads typed
+//! values out of a state — each the declared type or `null`, never a string
+//! to parse:
+//!
+//! ```no_run
+//! # async fn go() -> llm_wires::Result<()> {
+//! use llm_wires::{Extraction, Fact, FieldType, Wire};
+//!
+//! let extract = llm_wires::build_extract(
+//!     Wire::workers_ai(
+//!         "https://api.cloudflare.com/client/v4",
+//!         "your-account-id",
+//!         "@cf/cloudflare/clairic",
+//!     ),
+//!     Some(wire_secret::Secret::from("cf-…")),
+//! )?;
+//! let found = extract
+//!     .extract(
+//!         Extraction::of("I paid $649.00 plus $52.10 tax.")
+//!             .field("amount_paid", FieldType::number())
+//!             .field("tracking_number", FieldType::Text),
+//!     )
+//!     .await?;
+//! if let Fact::Number { value: Some(paid), .. } = found.answers["amount_paid"] {
+//!     println!("paid {paid}");
+//! }
+//! # Ok(()) }
+//! ```
+//!
+//! Four traits and not one with more methods, because a deployment that
+//! judges cannot chat, one that chats cannot judge, one that embeds does
+//! neither, and one that extracts does none of the three: a single interface
+//! would force every implementation to carry methods that always error. The
+//! switch stays one — `Wire` names every wire — and the trait a wire speaks is
+//! decided at [`build`], [`build_judge`], [`build_embed`] or
+//! [`build_extract`], once.
 //!
 //! ## What this crate is not
 //!
@@ -84,6 +114,7 @@
 mod anthropic;
 mod embedding;
 mod error;
+mod extraction;
 mod http;
 mod judgement;
 mod openai;
@@ -93,6 +124,7 @@ pub mod testing;
 mod tls;
 mod types;
 mod typesafe;
+mod workers_ai;
 
 use std::collections::BTreeMap;
 use std::pin::Pin;
@@ -103,6 +135,10 @@ use wire_secret::Secret;
 
 pub use embedding::{EmbedRequest, EmbedResponse};
 pub use error::{Error, Result};
+pub use extraction::{
+    DurationUnit, Extracted, Extraction, Fact, Field, FieldType, Image, Interval, Item, ListItem,
+    Point, Scale, Span, Step,
+};
 pub use judgement::{Answer, Judgement, Question, Verdict};
 pub use types::{
     ChatRequest, ChatResponse, Chunk, Finish, Info, Message, Role, Tool, ToolCall, ToolCallDelta,
@@ -164,6 +200,23 @@ pub trait Embed: Send + Sync {
     fn info(&self) -> Info;
 }
 
+/// One deployment, asked to read typed values out of a state.
+///
+/// Beside [`Provider`], [`Judge`] and [`Embed`] and part of none: an
+/// [`Extraction`] is a state and a map of typed fields, an [`Extracted`] is
+/// one [`Fact`] per field — the declared type or `null`, with the model's
+/// probability of `null` and a confidence — and nothing in that is a turn, a
+/// verdict over options, or a vector. The model is the [`Wire`]'s, as it is
+/// for every client.
+#[async_trait]
+pub trait Extract: Send + Sync {
+    /// Every field, answered or null.
+    async fn extract(&self, req: Extraction) -> Result<Extracted>;
+
+    /// What this client is, for a pane and a log line. Never a key.
+    fn info(&self) -> Info;
+}
+
 /// Extra headers sent on every request, in a stable order.
 ///
 /// Sorted rather than insertion-ordered so a request is the same bytes twice —
@@ -175,11 +228,11 @@ pub type Headers = BTreeMap<String, String>;
 /// Which wire, where, and speaking for what.
 ///
 /// The kinds an operator picks in the pane — `openai`, `azure`, `ollama`,
-/// `openrouter`, `anthropic`, `typesafe` — collapse onto these four; the
-/// mapping lives in `domains::llm`, one level up, where the card is. Three
-/// of them chat and are built with [`build`]; one judges and is built with
-/// [`build_judge`]; the two that speak OpenAI's shape also embed, through
-/// [`build_embed`]. The enum is one so that the card keeps one switch, and
+/// `openrouter`, `anthropic`, `typesafe`, `workers_ai` — collapse onto these
+/// five; the mapping lives in `domains::llm`, one level up, where the card
+/// is. Three of them chat and are built with [`build`]; one judges and is
+/// built with [`build_judge`]; the two that speak OpenAI's shape also embed,
+/// through [`build_embed`]; one extracts, through [`build_extract`]. The enum is one so that the card keeps one switch, and
 /// which trait a wire speaks is settled at `build` rather than by a method
 /// that answers [`Error::Cannot`] for ever.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -228,6 +281,26 @@ pub enum Wire {
         model: String,
         headers: Headers,
     },
+    /// `POST {endpoint}/accounts/{account}/ai/run/{model}` with a bearer
+    /// token: Cloudflare Workers AI's REST route, unwrapping Cloudflare's
+    /// `{result, success, errors}` envelope. An [`Extract`] today, for Clairic
+    /// (`@cf/cloudflare/clairic`), built with [`build_extract`].
+    ///
+    /// The endpoint is `https://api.cloudflare.com/client/v4` on the card,
+    /// the API's version being the operator's as OpenAI's `/v1` is, and a
+    /// gateway that serves the same path stands in by being another
+    /// endpoint. The model is a path, `@cf/…`, and goes in as written.
+    ///
+    /// Clef (`@cf/cloudflare/clef`), Cloudflare's decision model on the same
+    /// route, would be a [`Judge`] over this variant — an arm in
+    /// [`build_judge`] and a converter of its own. That is the next variant's
+    /// job and not this one's.
+    WorkersAi {
+        endpoint: String,
+        account: String,
+        model: String,
+        headers: Headers,
+    },
 }
 
 impl Wire {
@@ -238,6 +311,7 @@ impl Wire {
             Wire::Azure { .. } => "azure",
             Wire::Anthropic { .. } => "anthropic",
             Wire::TypeSafe { .. } => typesafe::WIRE,
+            Wire::WorkersAi { .. } => workers_ai::WIRE,
         }
     }
 
@@ -263,6 +337,20 @@ impl Wire {
     pub fn typesafe(endpoint: impl Into<String>, model: impl Into<String>) -> Wire {
         Wire::TypeSafe {
             endpoint: endpoint.into(),
+            model: model.into(),
+            headers: Headers::new(),
+        }
+    }
+
+    /// The common case for Workers AI.
+    pub fn workers_ai(
+        endpoint: impl Into<String>,
+        account: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Wire {
+        Wire::WorkersAi {
+            endpoint: endpoint.into(),
+            account: account.into(),
             model: model.into(),
             headers: Headers::new(),
         }
@@ -327,7 +415,7 @@ pub fn build(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Provider>> {
                 &endpoint, &model, &headers, &key,
             )?))
         }
-        Wire::TypeSafe { .. } => Err(Error::Cannot {
+        Wire::TypeSafe { .. } | Wire::WorkersAi { .. } => Err(Error::Cannot {
             wire: name,
             verb: "chat",
         }),
@@ -353,7 +441,10 @@ pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
                 &endpoint, &model, &headers, &key,
             )?))
         }
-        Wire::OpenAi { .. } | Wire::Azure { .. } | Wire::Anthropic { .. } => Err(Error::Cannot {
+        Wire::OpenAi { .. }
+        | Wire::Azure { .. }
+        | Wire::Anthropic { .. }
+        | Wire::WorkersAi { .. } => Err(Error::Cannot {
             wire: name,
             verb: "judge",
         }),
@@ -398,9 +489,42 @@ pub fn build_embed(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Embed>> {
                 &key,
             )?))
         }
-        Wire::Anthropic { .. } | Wire::TypeSafe { .. } => Err(Error::Cannot {
+        Wire::Anthropic { .. } | Wire::TypeSafe { .. } | Wire::WorkersAi { .. } => {
+            Err(Error::Cannot {
+                wire: name,
+                verb: "embed",
+            })
+        }
+    }
+}
+
+/// The switch over wires that extract. One arm today, Workers AI for
+/// Clairic, in [`build`]'s shape so that a second is an arm.
+///
+/// The key rule is [`build`]'s: `None` is refused, every wire authenticates.
+pub fn build_extract(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Extract>> {
+    let name = wire.name();
+    let key = key.ok_or(Error::NoKey(name))?;
+    match wire {
+        Wire::WorkersAi {
+            endpoint,
+            account,
+            model,
+            headers,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "account", &account)?;
+            require(name, "model", &model)?;
+            Ok(Box::new(workers_ai::WorkersAi::run(
+                &endpoint, &account, &model, &headers, &key,
+            )?))
+        }
+        Wire::OpenAi { .. }
+        | Wire::Azure { .. }
+        | Wire::Anthropic { .. }
+        | Wire::TypeSafe { .. } => Err(Error::Cannot {
             wire: name,
-            verb: "embed",
+            verb: "extract",
         }),
     }
 }
@@ -447,6 +571,18 @@ mod tests {
             Err(Error::NoKey(got)) => assert_eq!(got, "openai"),
             other => panic!("openai embeddings: expected NoKey, got {:?}", other.err()),
         }
+        match build_extract(clairic(), None) {
+            Err(Error::NoKey(got)) => assert_eq!(got, "workers_ai"),
+            other => panic!("workers_ai: expected NoKey, got {:?}", other.err()),
+        }
+    }
+
+    fn clairic() -> Wire {
+        Wire::workers_ai(
+            "https://api.cloudflare.com/client/v4",
+            "acc123",
+            "@cf/cloudflare/clairic",
+        )
     }
 
     #[test]
@@ -505,6 +641,40 @@ mod tests {
             .to_string(),
             "the anthropic wire cannot embed"
         );
+        // The fourth: Workers AI extracts and does nothing else, and nothing
+        // else extracts.
+        type Door = fn(Wire) -> Result<()>;
+        let doors: [(&str, Door); 3] = [
+            ("chat", |w| build(w, Some(Secret::from("k"))).map(drop)),
+            ("judge", |w| {
+                build_judge(w, Some(Secret::from("k"))).map(drop)
+            }),
+            ("embed", |w| {
+                build_embed(w, Some(Secret::from("k"))).map(drop)
+            }),
+        ];
+        for (want, door) in doors {
+            match door(clairic()) {
+                Err(Error::Cannot { wire, verb }) => assert_eq!((wire, verb), ("workers_ai", want)),
+                other => panic!("workers_ai {want}: expected Cannot, got {:?}", other.err()),
+            }
+        }
+        for wire in [
+            Wire::openai("https://api.openai.com/v1", "gpt-4o"),
+            Wire::anthropic("https://api.anthropic.com", "claude-sonnet-4"),
+            Wire::typesafe("https://api.typesafe.ai", "jev-latest"),
+            Wire::Azure {
+                endpoint: "https://x.openai.azure.com".into(),
+                deployment: "gpt-4o".into(),
+                api_version: String::new(),
+            },
+        ] {
+            let name = wire.name();
+            match build_extract(wire, Some(Secret::from("k"))) {
+                Err(Error::Cannot { wire, verb }) => assert_eq!((wire, verb), (name, "extract")),
+                other => panic!("{name}: expected Cannot, got {:?}", other.err()),
+            }
+        }
     }
 
     #[test]
@@ -540,6 +710,15 @@ mod tests {
         assert_eq!(judge.info().wire, "typesafe");
         assert_eq!(judge.info().model, "jev-latest");
         assert_eq!(judge.info().endpoint, "https://api.typesafe.ai");
+
+        let extract = build_extract(clairic(), Some(Secret::from("cf-x")))
+            .expect("the workers_ai wire is built");
+        assert_eq!(extract.info().wire, "workers_ai");
+        assert_eq!(extract.info().model, "@cf/cloudflare/clairic");
+        assert_eq!(
+            extract.info().endpoint,
+            "https://api.cloudflare.com/client/v4"
+        );
     }
 
     #[test]
@@ -551,6 +730,22 @@ mod tests {
             (Wire::openai("https://api.openai.com/v1", "  "), "model"),
             (Wire::typesafe("", "jev-latest"), "endpoint"),
             (Wire::typesafe("https://api.typesafe.ai", ""), "model"),
+            (
+                Wire::workers_ai("", "acc123", "@cf/cloudflare/clairic"),
+                "endpoint",
+            ),
+            (
+                Wire::workers_ai(
+                    "https://api.cloudflare.com/client/v4",
+                    " ",
+                    "@cf/cloudflare/clairic",
+                ),
+                "account",
+            ),
+            (
+                Wire::workers_ai("https://api.cloudflare.com/client/v4", "acc123", ""),
+                "model",
+            ),
             (
                 Wire::Azure {
                     // Azure's default endpoint is empty on the card: there is
@@ -576,6 +771,9 @@ mod tests {
             // accepts this wire must refuse it by the same field name.
             let doors: Vec<Result<()>> = match wire {
                 Wire::TypeSafe { .. } => vec![build_judge(wire, Some(Secret::from("k"))).map(drop)],
+                Wire::WorkersAi { .. } => {
+                    vec![build_extract(wire, Some(Secret::from("k"))).map(drop)]
+                }
                 // Anthropic has one door here; the two that speak OpenAI's
                 // shape have both, and the field is refused on each.
                 Wire::Anthropic { .. } => vec![build(wire, Some(Secret::from("k"))).map(drop)],

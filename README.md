@@ -3,8 +3,9 @@
 One `Provider` trait over the **Anthropic** and **OpenAI** HTTP shapes — tools,
 streaming, and a key that cannot accidentally be printed — and beside it a
 `Judge` trait over **TypeSafe**'s System One, for typed questions with
-calibrated answers, and an `Embed` trait over the OpenAI embeddings shape, for
-text turned into vectors.
+calibrated answers, an `Embed` trait over the OpenAI embeddings shape, for
+text turned into vectors, and an `Extract` trait over **Cloudflare Workers
+AI**'s Clairic, for typed values read out of text.
 
 ```rust
 use llm_wires::{ChatRequest, Wire};
@@ -134,6 +135,54 @@ this wire decodes floats. An empty batch, an empty text in one, or a width of
 zero is refused before the socket, naming the row — a server's 400 about a
 batch of two thousand is not a sentence anybody can act on. Azure embeddings
 are the same wire at Azure's URL, the deployment in the path.
+
+## `Extract`: typed values, on Workers AI
+
+Clairic (`@cf/cloudflare/clairic`) reads a text — and up to four images —
+against a map of typed fields, and answers each with its declared type or
+`null`: never a string to parse. That is neither a turn, a verdict nor a
+vector, so it is a fourth trait behind the same switch, built with
+`build_extract` on `Wire::WorkersAi` and refused once at build on every other
+wire.
+
+```rust
+use llm_wires::{Extraction, Fact, FieldType, Wire};
+
+let extract = llm_wires::build_extract(
+    Wire::workers_ai(
+        "https://api.cloudflare.com/client/v4",
+        "your-account-id",
+        "@cf/cloudflare/clairic",
+    ),
+    Some(wire_secret::Secret::from("cf-…")),
+)?;
+let found = extract
+    .extract(
+        Extraction::of("I paid $649.00 plus $52.10 tax.")
+            .field("amount_paid", FieldType::number())
+            .field("tracking_number", FieldType::Text),
+    )
+    .await?;
+// Fact::Number { value: Some(701.1), guess: Some(701.1), p_null, confidence }
+// Fact::Text   { value: None, guess: Some("$52.10"), span: Some(..), .. }
+```
+
+The nine field types are the schema's — text, number, date, time, datetime,
+duration, list, estimate, forecast — each with its own options. A scalar
+answer carries `value`, the `guess` it would have made when `value` is `null`,
+`p_null` and a `confidence`; text carries its character span in the state;
+an estimate is a median and an 80% interval; a forecast is one entry per step.
+An answer of another type, or a value of the wrong JSON kind, is an
+`Error::Decode` that names the field — never coerced. The request is sorted,
+so it is the same bytes twice. Cloudflare's `{result, success, errors}`
+envelope is unwrapped here, its `errors` become the error's message, and
+`cf-ray` is the request id.
+
+Read from the model's published JSON schemas rather than the launch post,
+which leaves names out: percentiles are a request-wide `include_quantiles`,
+a forecast takes an `interval`, and images are data URLs or
+`{content_type, base64}`. Cloudflare's decision model, Clef, would be a
+`Judge` on the same wire and is not here yet.
 
 ## `wire-secret`
 
