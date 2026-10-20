@@ -561,12 +561,17 @@ const RECEIPT: &str = r#"{
   "messages": []
 }"#;
 
-/// The launch post's TSA forecast, in the REST envelope.
+/// The launch post's TSA forecast, in the REST envelope, with the `steps`
+/// array the live server sends beside the parallel arrays (recorded
+/// 2026-10-20, where the post shows only the arrays and the schema only
+/// names `steps`). The arrays are what the wire reads; `steps` is here so
+/// that a reply carrying both is pinned to decode.
 const FORECAST: &str = r#"{
   "result": {
     "model": "clairic",
     "answers": {
-      "travelers": {"type": "forecast", "value": [2416117], "median": [2419283], "p10": [2270774], "p90": [2556769]}
+      "travelers": {"type": "forecast", "value": [2416117], "median": [2419283], "p10": [2270774], "p90": [2556769],
+        "steps": [{"value": 2416117, "mean": 2416117, "median": 2419283, "p10": 2270774, "p90": 2556769, "p_below": 2.6e-05, "p_above": 6.5e-06}]}
     },
     "truncated": false,
     "usage": {"input_tokens": 3000, "output_tokens": 0}

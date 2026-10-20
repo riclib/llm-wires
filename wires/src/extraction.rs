@@ -440,7 +440,9 @@ pub enum Fact {
         /// 99 percentiles, when [`Extraction::quantiles`] asked for them.
         quantiles: Vec<Point>,
     },
-    /// One entry per step, in order, in each array.
+    /// One entry per step, in order, in each array. The server also sends
+    /// a `steps` array of whole estimates, each with its own `p_below`,
+    /// `p_above` and, when asked, quantiles; those are not read here yet.
     Forecast {
         value: Vec<Point>,
         median: Vec<Point>,
