@@ -532,22 +532,29 @@ async fn cloudflares_no_carries_its_errors_and_the_ray() {
         r#"{"result":null,"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[]}"#,
     ))
     .await;
-    match extractor(f.endpoint_at("/client/v4"))
+    let err = extractor(f.endpoint_at("/client/v4"))
         .extract(email())
         .await
-    {
-        Err(Error::Api {
+        .expect_err("a bad token is refused");
+    match &err {
+        Error::Api {
             status,
             message,
+            code,
             request_id,
             ..
-        }) => {
-            assert_eq!(status, 401);
-            assert_eq!(message, "Authentication error (code 10000)");
+        } => {
+            assert_eq!(*status, 401);
+            assert_eq!(message, "Authentication error");
+            assert_eq!(code.as_deref(), Some("10000"));
             assert_eq!(request_id.as_deref(), Some("8f1d2c3b4a5e6f70-LIS"));
         }
         other => panic!("expected Api, got {other:?}"),
     }
+    assert_eq!(
+        err.to_string(),
+        "the provider answered 401 10000: Authentication error (request 8f1d2c3b4a5e6f70-LIS)"
+    );
 
     // And a 200 whose envelope says no is the same no.
     let f = fixture(Reply::Json(
@@ -558,11 +565,10 @@ async fn cloudflares_no_carries_its_errors_and_the_ray() {
         .extract(email())
         .await
     {
-        Err(Error::Api {
-            status, message, ..
-        }) => {
+        Err(err @ Error::Api { status, .. }) => {
             assert_eq!(status, 200);
-            assert_eq!(message, "No such model (code 5007)");
+            assert_eq!(err.code(), Some("5007"));
+            assert!(err.to_string().ends_with(": No such model"), "{err}");
         }
         other => panic!("expected Api, got {other:?}"),
     }

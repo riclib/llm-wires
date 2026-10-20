@@ -105,6 +105,7 @@ pub(crate) async fn post_json<B: Serialize + ?Sized>(
     Err(Error::Api {
         status: status.as_u16(),
         message: api_message(&text, status.as_u16()),
+        code: api_code(&text),
         request_id,
         retry_after,
     })
@@ -187,13 +188,43 @@ pub(crate) fn api_message(body: &str, status: u16) -> String {
     clip(body)
 }
 
+/// The provider's code inside an error body, across the shapes that carry
+/// one. A systemone daemon: `{"error": "…", "code": "STATE_TRUNCATED"}`, the
+/// code beside the sentence. TypeSafe's object form: `{"detail": {"message",
+/// "code"}}`, or — what hosted TypeSafe answers for a state past the window,
+/// recorded 2026-10-20 — `{"detail": {"error_type": "max_tokens_exceeded"}}`
+/// with a 400, the code and no sentence. OpenAI: `{"error": {"message", "code"}}`, where `code` is often
+/// `null`. Cloudflare: the first entry of `errors` that has one, a number
+/// written as its digits. Anthropic names none — its `error.type` is a class
+/// (`overloaded_error`) and not a code — and a body that names none is
+/// `None`: a code is the provider's word or nothing.
+pub(crate) fn api_code(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let code = |c: &serde_json::Value| match c {
+        serde_json::Value::String(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    };
+    v.get("code")
+        .and_then(code)
+        .or_else(|| v.pointer("/detail/code").and_then(code))
+        .or_else(|| v.pointer("/detail/error_type").and_then(code))
+        .or_else(|| v.pointer("/error/code").and_then(code))
+        .or_else(|| {
+            v.get("errors")?
+                .as_array()?
+                .iter()
+                .find_map(|e| e.get("code").and_then(code))
+        })
+}
+
 /// The message inside an error body, across the shapes the wires answer
 /// with. OpenAI and Anthropic: `{"error": {"message": …}}`. TypeSafe:
 /// `{"detail": …}`, where `detail` is a string, an object with a `message`,
 /// or — on a 422 — an array of `{loc, msg}` validation errors, joined the way
 /// their SDK joins them so the two read the same in a log line. Cloudflare:
-/// `{"errors": [{"code": …, "message": …}], "success": false}`, each entry
-/// with its code, joined.
+/// `{"errors": [{"code": …, "message": …}], "success": false}`, the
+/// messages joined; the code is [`api_code`]'s.
 fn error_message(v: &serde_json::Value) -> Option<String> {
     let non_empty = |s: &str| (!s.is_empty()).then(|| s.to_string());
     if let Some(errors) = v.get("errors").and_then(|e| e.as_array()) {
@@ -201,10 +232,7 @@ fn error_message(v: &serde_json::Value) -> Option<String> {
             .iter()
             .filter_map(|e| {
                 let msg = e.get("message")?.as_str().filter(|m| !m.is_empty())?;
-                Some(match e.get("code").filter(|c| !c.is_null()) {
-                    Some(code) => format!("{msg} (code {code})"),
-                    None => msg.to_string(),
-                })
+                Some(msg.to_string())
             })
             .collect();
         if !parts.is_empty() {
@@ -393,26 +421,60 @@ mod tests {
     }
 
     #[test]
-    fn cloudflares_errors_give_up_each_message_with_its_code() {
-        assert_eq!(
-            api_message(
-                r#"{"result":null,"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[]}"#,
-                401
-            ),
-            "Authentication error (code 10000)"
-        );
-        assert_eq!(
-            api_message(
-                r#"{"success":false,"errors":[{"code":5006,"message":"fields: required"},{"message":"and another"},{"code":1}]}"#,
-                400
-            ),
-            "fields: required (code 5006); and another"
-        );
+    fn cloudflares_errors_give_up_each_message_and_the_first_code() {
+        let body = r#"{"result":null,"success":false,"errors":[{"code":10000,"message":"Authentication error"}],"messages":[]}"#;
+        assert_eq!(api_message(body, 401), "Authentication error");
+        assert_eq!(api_code(body).as_deref(), Some("10000"));
+        let body = r#"{"success":false,"errors":[{"message":"no code here"},{"code":5006,"message":"fields: required"},{"code":1}]}"#;
+        assert_eq!(api_message(body, 400), "no code here; fields: required");
+        // The first entry that has a code, and its digits as text.
+        assert_eq!(api_code(body).as_deref(), Some("5006"));
         // An empty list says nothing and the body passes through.
         assert_eq!(
             api_message(r#"{"success":false,"errors":[]}"#, 500),
             r#"{"success":false,"errors":[]}"#
         );
+        assert_eq!(api_code(r#"{"success":false,"errors":[]}"#), None);
+    }
+
+    #[test]
+    fn a_refusal_gives_up_the_providers_code_in_each_shape_that_has_one() {
+        // A systemone daemon refusing a state past the model's window: the
+        // code beside the sentence, and the sentence is still the message.
+        let daemon = r#"{"error":"state is 9120 tokens; laya:en reads at most 8192","code":"STATE_TRUNCATED","detail":[{"loc":["body","state"],"msg":"too long"}]}"#;
+        assert_eq!(api_code(daemon).as_deref(), Some("STATE_TRUNCATED"));
+        assert_eq!(
+            api_message(daemon, 422),
+            "state is 9120 tokens; laya:en reads at most 8192"
+        );
+        // Hosted TypeSafe past its window, byte for byte (2026-10-20).
+        assert_eq!(
+            api_code(r#"{"detail":{"error_type":"max_tokens_exceeded"}}"#).as_deref(),
+            Some("max_tokens_exceeded")
+        );
+        // TypeSafe's object detail.
+        assert_eq!(
+            api_code(r#"{"detail":{"message":"Overloaded","code":"busy"}}"#).as_deref(),
+            Some("busy")
+        );
+        // OpenAI's error object, and its frequent null.
+        assert_eq!(
+            api_code(r#"{"error":{"message":"too long","type":"invalid_request_error","code":"context_length_exceeded"}}"#)
+                .as_deref(),
+            Some("context_length_exceeded")
+        );
+        let none = [
+            r#"{"error":{"message":"x","type":"server_error","code":null}}"#,
+            // Anthropic's `type` is a class, not a code.
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"detail":"Invalid API key"}"#,
+            r#"{"error":"x","code":"  "}"#,
+            "<html>502 Bad Gateway</html>",
+            "",
+        ];
+        for body in none {
+            assert_eq!(api_code(body), None, "{body}");
+        }
     }
 
     #[test]

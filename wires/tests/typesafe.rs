@@ -230,11 +230,15 @@ async fn a_4xx_carries_the_apis_detail_its_request_id_and_never_the_state() {
         Error::Api {
             status,
             message,
+            code,
             request_id,
             retry_after,
+            ..
         } => {
             assert_eq!(*status, 401);
             assert_eq!(message, "Invalid API key");
+            // A bare `detail` string names no code, and none is made up.
+            assert_eq!(*code, None);
             assert_eq!(request_id.as_deref(), Some("req_01HZX"));
             assert_eq!(*retry_after, None);
         }
@@ -385,3 +389,73 @@ const ANSWERS: &str = r#"{
   },
   "usage": {"input_tokens": 312, "output_tokens": 48}
 }"#;
+
+#[tokio::test]
+async fn a_daemons_refusal_keeps_its_code_beside_the_sentence() {
+    // What a local systemone daemon answers for a state past the model's
+    // window (#1267): the sentence, a machine-readable code, and the
+    // validation detail. The code is what a caller routes on — send the row
+    // to a judge with a longer window — so it must arrive as a field and not
+    // only inside a sentence the daemon is free to reword.
+    let f = fixture(Reply::Status(
+        422,
+        r#"{"error":"state is 9120 tokens; laya:en reads at most 8192","code":"STATE_TRUNCATED","detail":[{"loc":["body","state"],"msg":"too long","type":"value_error"}]}"#,
+    ))
+    .await;
+    let judge = llm_wires::build_judge(
+        Wire::typesafe(f.root(), "laya:en"),
+        Some(Secret::from("ollaya")),
+    )
+    .unwrap();
+    let err = judge
+        .judge(Judgement::of("a long state").ask("q", Question::noul("?")))
+        .await
+        .expect_err("a truncated state is refused");
+
+    assert_eq!(err.code(), Some("STATE_TRUNCATED"));
+    match &err {
+        Error::Api {
+            status,
+            message,
+            code,
+            ..
+        } => {
+            assert_eq!(*status, 422);
+            assert_eq!(message, "state is 9120 tokens; laya:en reads at most 8192");
+            assert_eq!(code.as_deref(), Some("STATE_TRUNCATED"));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        err.to_string(),
+        "the provider answered 422 STATE_TRUNCATED: state is 9120 tokens; laya:en reads at most 8192"
+    );
+    // Every other error has no code.
+    assert_eq!(Error::Decode("x".into()).code(), None);
+}
+
+#[tokio::test]
+async fn hosted_typesafe_past_its_window_is_a_400_whose_code_is_max_tokens_exceeded() {
+    // Recorded against api.typesafe.ai on 2026-10-20 with a 25,000-word
+    // state: a 400, no sentence, and the code under `detail.error_type`. Not
+    // the daemon's `STATE_TRUNCATED` — the two name the same refusal
+    // differently, and a caller routing on it reads both.
+    let f = fixture(Reply::Status(
+        400,
+        r#"{"detail":{"error_type":"max_tokens_exceeded"}}"#,
+    ))
+    .await;
+    let err = llm_wires::build_judge(
+        Wire::typesafe(f.root(), "jev-latest"),
+        Some(Secret::from("ts-k")),
+    )
+    .unwrap()
+    .judge(Judgement::of("a long state").ask("q", Question::noul("?")))
+    .await
+    .expect_err("a state past the window is refused");
+    assert_eq!(err.code(), Some("max_tokens_exceeded"));
+    match &err {
+        Error::Api { status, .. } => assert_eq!(*status, 400),
+        other => panic!("{other:?}"),
+    }
+}

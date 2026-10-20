@@ -172,7 +172,8 @@ async fn a_refusal_carries_the_providers_words_and_its_request_id() {
     let f = fixture(Reply::Headed(
         401,
         &[("x-request-id", "req_embed_1"), ("retry-after", "2")],
-        r#"{"error":{"message":"Incorrect API key provided: sk-***","type":"invalid_request_error"}}"#,
+        // OpenAI's own body for a wrong key, `code` and all.
+        r#"{"error":{"message":"Incorrect API key provided: sk-***","type":"invalid_request_error","param":null,"code":"invalid_api_key"}}"#,
     ))
     .await;
     let embed = llm_wires::build_embed(
@@ -185,11 +186,14 @@ async fn a_refusal_carries_the_providers_words_and_its_request_id() {
         Err(Error::Api {
             status,
             message,
+            code,
             request_id,
             retry_after,
+            ..
         }) => {
             assert_eq!(status, 401);
             assert_eq!(message, "Incorrect API key provided: sk-***");
+            assert_eq!(code.as_deref(), Some("invalid_api_key"));
             assert_eq!(request_id.as_deref(), Some("req_embed_1"));
             assert_eq!(retry_after, Some(std::time::Duration::from_secs(2)));
         }

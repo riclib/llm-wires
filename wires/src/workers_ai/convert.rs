@@ -315,7 +315,7 @@ fn valid_name(name: &str) -> bool {
 ///
 /// `status` is the 2xx the body came with: a `success: false` inside one is
 /// the provider saying no, and it becomes the [`Error::Api`] a non-2xx would
-/// have, with the envelope's `errors` as the message.
+/// have, with the envelope's `errors` as the message and the code.
 pub(crate) fn response(text: &str, status: u16, req: &Extraction) -> Result<Extracted> {
     let body: Value = serde_json::from_str(text)
         .map_err(|e| Error::Decode(format!("{e} in {}", http::clip(text))))?;
@@ -323,6 +323,7 @@ pub(crate) fn response(text: &str, status: u16, req: &Extraction) -> Result<Extr
         return Err(Error::Api {
             status,
             message: http::api_message(text, status),
+            code: http::api_code(text),
             request_id: None,
             retry_after: None,
         });

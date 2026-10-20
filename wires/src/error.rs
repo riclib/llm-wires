@@ -101,10 +101,22 @@ pub enum Error {
     /// support without the request. `retry_after` is a 429's `retry-after-ms`
     /// or `Retry-After`, surfaced and **not acted on**: this crate does not
     /// retry, the run above it does, and this is the number the run wants.
-    #[error("the provider answered {status}: {message}{}", tag(.request_id))]
+    ///
+    /// `code` is the provider's machine-readable name for the refusal, when
+    /// the body carries one: a systemone daemon's `STATE_TRUNCATED`, OpenAI's
+    /// `context_length_exceeded`, Cloudflare's `10000`. It is what a caller
+    /// routes on — send a truncated state to a judge with a longer window —
+    /// so that nobody has to match the sentence, which is the provider's to
+    /// reword. `None` when the body named no code; never made up here.
+    ///
+    /// `non_exhaustive`, so that the next thing a refusal carries is a field
+    /// and not a breaking release: match it with `..`.
+    #[error("the provider answered {status}{}: {message}{}", code_tag(.code), tag(.request_id))]
+    #[non_exhaustive]
     Api {
         status: u16,
         message: String,
+        code: Option<String>,
         request_id: Option<String>,
         retry_after: Option<Duration>,
     },
@@ -132,6 +144,23 @@ fn tag(request_id: &Option<String>) -> String {
     request_id
         .as_deref()
         .map_or_else(String::new, |id| format!(" (request {id})"))
+}
+
+/// ` STATE_TRUNCATED` after the status when the provider named a code.
+fn code_tag(code: &Option<String>) -> String {
+    code.as_deref()
+        .map_or_else(String::new, |c| format!(" {c}"))
+}
+
+impl Error {
+    /// The provider's code for a refusal, when it gave one; `None` for every
+    /// other error, and for a refusal that named none.
+    pub fn code(&self) -> Option<&str> {
+        match self {
+            Error::Api { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
 }
 
 impl From<reqwest::Error> for Error {

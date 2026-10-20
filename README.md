@@ -99,6 +99,11 @@ match &verdict.answers["department"] {
   `Error::Api` and not acted on; what confidence is enough to act on is the
   caller's number. The provider's request id rides the same error, on every
   wire.
+- **A refusal keeps its code.** When the body names one, `Error::Api` carries
+  the provider's machine-readable `code` beside the sentence — a systemone
+  daemon's `STATE_TRUNCATED`, hosted TypeSafe's `max_tokens_exceeded` — and
+  `Error::code()` reads it off any error, so a caller routes on the code and
+  never matches text the provider is free to reword.
 - Read from the published SDK (`@typesafe-ai/sdk` 0.6.0) rather than the
   docs' prose, where the two differ.
 
