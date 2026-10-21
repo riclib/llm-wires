@@ -13,7 +13,9 @@
 //! - a tool call is a **`tool_use` content block** whose input is a JSON
 //!   object, and its answer a `tool_result` block on a *user* turn;
 //! - **`cache_stable_prefix` is acted on**: it becomes a `cache_control`
-//!   breakpoint, and this is the only wire where the flag changes a byte.
+//!   breakpoint, and this is the only wire where the flag changes a byte —
+//!   on the last stable system block, with `system_volatile` its own block
+//!   after it.
 
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +157,9 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
     if !req.system.is_empty() {
         system.push(TextBlock::new(req.system));
     }
+    // The volatile tail is pushed after the breakpoint below, so a hoisted
+    // system message stays on the stable side of it.
+    let volatile = req.system_volatile;
 
     let mut messages: Vec<WireMessage> = Vec::new();
     for (i, m) in req.messages.into_iter().enumerate() {
@@ -274,6 +279,12 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
         if let Some(last) = tools.last_mut() {
             last.cache_control = Some(CacheControl::ephemeral());
         }
+    }
+    // **The volatile tail, a block of its own past the breakpoint**: read at
+    // full price on every request, and never a reason the stable prefix in
+    // front of it misses.
+    if !volatile.is_empty() {
+        system.push(TextBlock::new(volatile));
     }
 
     Ok(Request {
@@ -667,6 +678,64 @@ mod tests {
         assert_eq!(out["tools"][1]["cache_control"], breakpoint);
         // Nowhere else — the per-turn messages are what changes.
         assert_eq!(out.to_string().matches("cache_control").count(), 2, "{out}");
+    }
+
+    #[test]
+    fn the_volatile_system_text_is_a_block_after_the_breakpoint() {
+        // Stable, then the hoisted system message (still stable), then the
+        // volatile block. The breakpoint is on the last STABLE block, so the
+        // clock or the row in the volatile one never moves it.
+        let req = |cache: bool| ChatRequest {
+            messages: vec![Message::system("second"), Message::user("hi")],
+            system: "first".into(),
+            system_volatile: "It is 10:00.".into(),
+            cache_stable_prefix: cache,
+            ..ChatRequest::default()
+        };
+        let out = build(req(true));
+        assert_eq!(
+            out["system"],
+            serde_json::json!([
+                {"type": "text", "text": "first"},
+                {"type": "text", "text": "second", "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": "It is 10:00."},
+            ])
+        );
+        // Off, the same three blocks and no breakpoint.
+        let out = build(req(false));
+        assert_eq!(out["system"].as_array().map(Vec::len), Some(3), "{out}");
+        assert!(!out.to_string().contains("cache_control"), "{out}");
+
+        // Volatile alone: its block, and no breakpoint on it.
+        let out = build(ChatRequest {
+            messages: vec![Message::user("hi")],
+            system_volatile: "It is 10:00.".into(),
+            cache_stable_prefix: true,
+            ..ChatRequest::default()
+        });
+        assert_eq!(
+            out["system"],
+            serde_json::json!([{"type": "text", "text": "It is 10:00."}])
+        );
+
+        // Empty: the shape without the field, exactly — one system block carrying the
+        // breakpoint, and no empty block after it.
+        assert_eq!(
+            build(ChatRequest {
+                system_volatile: String::new(),
+                cache_stable_prefix: true,
+                ..ChatRequest::ask("You are terse.", "hi")
+            }),
+            serde_json::json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "system": [{"type": "text", "text": "You are terse.",
+                            "cache_control": {"type": "ephemeral"}}],
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                ],
+            })
+        );
     }
 
     #[test]
