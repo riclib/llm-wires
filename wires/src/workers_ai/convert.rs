@@ -19,10 +19,10 @@ use std::collections::BTreeMap;
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::extraction::{FieldType, Image, Point, Scale, Step};
+use crate::extraction::{FieldType, Point, Scale, Step};
 use crate::{
-    Distribution, Error, Extracted, Extraction, Fact, Field, Item, ListItem, Result, Span, Usage,
-    http,
+    Distribution, Error, Extracted, Extraction, Fact, Field, Image, Item, ListItem, Result, Span,
+    Usage, http,
 };
 
 use super::WIRE;

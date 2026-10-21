@@ -6,6 +6,8 @@
 //! the [`Wire`](crate::Wire) a client was built from, so one client is one
 //! deployment and a caller cannot ask it for a different model by accident.
 
+use crate::{Error, Image, Result};
+
 /// Who a message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -37,6 +39,10 @@ impl Role {
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Images on a user turn, sent before its text — the order both wires'
+    /// docs recommend. Only a user turn may carry them; a request with one
+    /// elsewhere is refused before the socket, by both wires alike.
+    pub images: Vec<Image>,
     /// Set on an assistant turn that asked for tools.
     pub tool_calls: Vec<ToolCall>,
     /// Set on a `tool` turn: which call this answers.
@@ -61,6 +67,7 @@ impl Message {
         Message {
             role: Role::Tool,
             content: content.into(),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(tool_call_id.into()),
         }
@@ -70,6 +77,7 @@ impl Message {
         Message {
             role,
             content: content.into(),
+            images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -79,6 +87,33 @@ impl Message {
     pub fn with_tool_calls(mut self, calls: Vec<ToolCall>) -> Message {
         self.tool_calls = calls;
         self
+    }
+
+    /// A user turn that shows the model these images, before its text.
+    pub fn with_images(mut self, images: impl IntoIterator<Item = Image>) -> Message {
+        self.images.extend(images);
+        self
+    }
+}
+
+/// An image anywhere but a user turn is a request neither chat wire sends:
+/// OpenAI takes image parts only from the user, and Anthropic refuses them
+/// from the assistant. Refused here, by the turn's index, so the answer is
+/// the same whichever wire the card names.
+pub(crate) fn images_on_user_turns_only(wire: &'static str, req: &ChatRequest) -> Result<()> {
+    match req
+        .messages
+        .iter()
+        .position(|m| !m.images.is_empty() && m.role != Role::User)
+    {
+        Some(i) => Err(Error::Invalid {
+            wire,
+            what: format!(
+                "message {i} ({}) carries images; only a user turn may",
+                req.messages[i].role.as_str()
+            ),
+        }),
+        None => Ok(()),
     }
 }
 

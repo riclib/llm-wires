@@ -20,7 +20,7 @@
 mod convert;
 
 use async_trait::async_trait;
-use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderName, HeaderValue, USER_AGENT};
+use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use wire_secret::Secret;
 
 use crate::{Headers, Info, Judge, Judgement, Result, Verdict, http};
@@ -34,6 +34,9 @@ const IDENT: &str = concat!("llm-wires/", env!("CARGO_PKG_VERSION"));
 
 const SDK_HEADER: HeaderName = HeaderName::from_static("x-typesafe-sdk");
 const RUNTIME_HEADER: HeaderName = HeaderName::from_static("x-typesafe-runtime");
+/// Images and box questions are off unless a request says otherwise, and
+/// only a request that carries one says so.
+const IMAGES_HEADER: HeaderName = HeaderName::from_static("typesafe-danger-zone-images");
 
 /// A client for one model.
 ///
@@ -89,7 +92,11 @@ impl TypeSafe {
 impl Judge for TypeSafe {
     async fn judge(&self, req: Judgement) -> Result<Verdict> {
         let body = convert::request(&req, &self.model)?;
-        let text = http::post_json(&self.http, &self.url, &body)
+        let mut headers = HeaderMap::new();
+        if body.needs_images() {
+            headers.insert(IMAGES_HEADER, HeaderValue::from_static("true"));
+        }
+        let text = http::post_json_with(&self.http, &self.url, &body, headers)
             .await?
             .text()
             .await?;

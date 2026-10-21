@@ -108,12 +108,14 @@ impl OpenAi {
 #[async_trait]
 impl Provider for OpenAi {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
+        crate::types::images_on_user_turns_only(self.wire, &req)?;
         let body = convert::request(req, &self.model, false);
         let text = self.send(&body).await?.text().await?;
         convert::response(&text)
     }
 
     async fn chat_stream(&self, req: ChatRequest) -> Result<ChunkStream> {
+        crate::types::images_on_user_turns_only(self.wire, &req)?;
         let body = convert::request(req, &self.model, true);
         let resp = http::require_event_stream(self.send(&body).await?).await?;
         Ok(stream::chunks(resp))

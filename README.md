@@ -86,10 +86,11 @@ match &verdict.answers["department"] {
 }
 ```
 
-- **Three question kinds, three answer kinds.** `noul` (yes/no, answered as a
+- **Four question kinds, four answer kinds.** `noul` (yes/no, answered as a
   probability), `choice` (labelled options, answered with the pick and the
   whole distribution), `score` (an ordered rubric, answered as a weighted
-  level between the ends). Every leaf — the state, the instructions, a
+  level between the ends), `box` (where something is in an image, answered
+  as four edges in fractions of it). Every leaf — the state, the instructions, a
   description — is a `serde_json::Value`, because the wire takes text, an
   object, an array or `null` at each of them.
 - **A 200 that is not what we asked is an error.** An answer missing for a
@@ -106,6 +107,33 @@ match &verdict.answers["department"] {
   never matches text the provider is free to reword.
 - Read from the published SDK (`@typesafe-ai/sdk` 0.6.0) rather than the
   docs' prose, where the two differ.
+
+### Images
+
+A judgement carries images as `assets`, each under a reference the caller
+writes wherever the image belongs — in the state, an instruction, a
+criterion — and the server puts the image in its place:
+
+```rust
+use llm_wires::{Image, Judgement, Question};
+
+let judgement = Judgement::of(serde_json::json!({"photo": "ref-6e1d0b7c"}))
+    .image("ref-6e1d0b7c", Image::from_bytes("image/jpeg", &bytes))
+    .ask("mug", Question::locate("the coffee mug in `photo`"))
+    .ask("mug_visible", Question::noul("Is there a coffee mug in `photo`?"));
+```
+
+The images header TypeSafe requires goes on a request with an image or a box
+question, and on no other. What the server would refuse is refused before
+the socket, naming the reference: an asset referenced nowhere, a file that
+is not a PNG or a JPEG, or a side outside 280–1568 pixels, read from the
+file's own header — measured live, both ends inclusive. The wire refuses
+rather than resizes, as the server does. Box questions need Jev 1.14
+(`jev-preview`); `jev-latest` refuses them.
+
+The same `Image` goes on a chat turn: `Message::user(…).with_images([…])`
+sends Anthropic `image` blocks and OpenAI `image_url` parts, before the
+text. Only a user turn may carry one.
 
 ## `Embed`: vectors
 

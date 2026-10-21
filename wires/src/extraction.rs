@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::ops::Range;
 
-use crate::Usage;
+use crate::{Image, Usage};
 
 /// One state and the fields to read out of it.
 ///
@@ -79,18 +79,6 @@ impl Extraction {
         self.reference_date = Some(date.into());
         self
     }
-}
-
-/// An image, as the wire takes one: embedded, never fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Image {
-    /// A whole `data:` URL, `data:image/png;base64,…`.
-    DataUrl(String),
-    /// The bytes as base64, and their media type.
-    Base64 {
-        content_type: String,
-        base64: String,
-    },
 }
 
 /// One typed field: what to read, and how the model should read it.

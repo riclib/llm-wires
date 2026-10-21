@@ -109,6 +109,17 @@ enum Block {
         tool_use_id: String,
         content: String,
     },
+    /// An image, as base64 with its media type: this wire takes no URL here.
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageSource {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    media_type: String,
+    data: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -146,7 +157,7 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
     }
 
     let mut messages: Vec<WireMessage> = Vec::new();
-    for m in req.messages {
+    for (i, m) in req.messages.into_iter().enumerate() {
         match m.role {
             Role::System => {
                 if !m.content.is_empty() {
@@ -160,9 +171,27 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
                 // takes it. This wire refuses an empty text block, and that
                 // refusal is the provider's to make: dropping the turn here
                 // would answer a question nobody asked it, silently.
+                let mut content = Vec::with_capacity(m.images.len() + 1);
+                for (j, img) in m.images.iter().enumerate() {
+                    let (media_type, data) = img.base64_parts().ok_or_else(|| Error::Invalid {
+                        wire: "anthropic",
+                        what: format!(
+                            "message {i}, image {j}: a data URL that is not base64; \
+                             this wire takes the bytes"
+                        ),
+                    })?;
+                    content.push(Block::Image {
+                        source: ImageSource {
+                            kind: "base64",
+                            media_type: media_type.to_string(),
+                            data: data.to_string(),
+                        },
+                    });
+                }
+                content.push(Block::Text { text: m.content });
                 messages.push(WireMessage {
                     role: "user",
-                    content: vec![Block::Text { text: m.content }],
+                    content,
                 });
             }
             Role::Assistant => {
@@ -346,6 +375,7 @@ pub(crate) fn response(text: &str) -> Result<ChatResponse> {
         message: Message {
             role: Role::Assistant,
             content,
+            images: Vec::new(),
             tool_calls: tool_calls.clone(),
             tool_call_id: None,
         },

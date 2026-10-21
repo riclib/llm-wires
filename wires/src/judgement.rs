@@ -20,7 +20,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use crate::Usage;
+use crate::{Image, Usage};
 
 /// One state and the questions to ask of it.
 ///
@@ -35,6 +35,15 @@ pub struct Judgement {
     /// `null`, which the wire accepts.
     pub state: Value,
     pub questions: BTreeMap<String, Question>,
+    /// Images, under the reference the caller wrote where each belongs: in
+    /// the state, in a question's instructions, in a criterion. The server
+    /// puts the image wherever the reference appears as or inside a string.
+    /// The reference is matched as plain text, so it must be something the
+    /// text cannot contain by accident; TypeSafe recommends a new UUID per
+    /// image per request. Each must be referenced somewhere, and a PNG or
+    /// JPEG from 280 to 1568 pixels a side, or the request is refused
+    /// before the socket.
+    pub assets: BTreeMap<String, Image>,
 }
 
 impl Judgement {
@@ -44,7 +53,14 @@ impl Judgement {
         Judgement {
             state: state.into(),
             questions: BTreeMap::new(),
+            assets: BTreeMap::new(),
         }
+    }
+
+    /// One more image, under the reference written where it belongs.
+    pub fn image(mut self, reference: impl Into<String>, image: Image) -> Judgement {
+        self.assets.insert(reference.into(), image);
+        self
     }
 
     /// One more question, under the name its answer will come back as.
@@ -54,7 +70,7 @@ impl Judgement {
     }
 }
 
-/// One typed question. The three kinds are the wire's, and each answer type
+/// One typed question. The four kinds are the wire's, and each answer type
 /// matches its question's.
 ///
 /// `instructions` is what the model is asked, as text, an object or an
@@ -87,6 +103,15 @@ pub enum Question {
         /// least two, and [`build_judge`](crate::build_judge)'s client refuses
         /// fewer before the socket.
         levels: Vec<Value>,
+    },
+    /// Where something is in an image: the four edges of the smallest box
+    /// around it. Needs an image in the request and a model that reads
+    /// them (`jev-preview`, Jev 1.14). There is no "not found": a box is
+    /// always answered, so ask a [`Question::Noul`] beside it whether the
+    /// thing is there at all.
+    Box {
+        /// What to find, and in which image: "the mug in `photo`".
+        instructions: Value,
     },
 }
 
@@ -142,12 +167,20 @@ impl Question {
         }
     }
 
-    /// The wire's name for the kind: `noul`, `choice`, `score`.
+    /// A box around what `instructions` names.
+    pub fn locate(instructions: impl Into<Value>) -> Question {
+        Question::Box {
+            instructions: instructions.into(),
+        }
+    }
+
+    /// The wire's name for the kind: `noul`, `choice`, `score`, `box`.
     pub fn kind(&self) -> &'static str {
         match self {
             Question::Noul { .. } => "noul",
             Question::Choice { .. } => "choice",
             Question::Score { .. } => "score",
+            Question::Box { .. } => "box",
         }
     }
 }
@@ -178,15 +211,28 @@ pub enum Answer {
         probabilities: Vec<f64>,
         confidence: f64,
     },
+    /// Each edge as a fraction of the image, from the top-left corner:
+    /// `left` and `right` of its width, `top` and `bottom` of its height.
+    /// The same answer at any size of the image; multiply by its pixels to
+    /// crop.
+    Box {
+        top: f64,
+        bottom: f64,
+        left: f64,
+        right: f64,
+        /// `None` when the model gave none, which the wire allows.
+        confidence: Option<f64>,
+    },
 }
 
 impl Answer {
-    /// The wire's name for the kind: `noul`, `choice`, `score`.
+    /// The wire's name for the kind: `noul`, `choice`, `score`, `box`.
     pub fn kind(&self) -> &'static str {
         match self {
             Answer::Noul { .. } => "noul",
             Answer::Choice { .. } => "choice",
             Answer::Score { .. } => "score",
+            Answer::Box { .. } => "box",
         }
     }
 }

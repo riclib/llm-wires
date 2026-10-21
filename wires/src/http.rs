@@ -94,7 +94,24 @@ pub(crate) async fn post_json<B: Serialize + ?Sized>(
     url: &reqwest::Url,
     body: &B,
 ) -> Result<reqwest::Response> {
-    let resp = http.post(url.clone()).json(body).send().await?;
+    post_json_with(http, url, body, HeaderMap::new()).await
+}
+
+/// [`post_json`], with headers for this request only: the ones a request
+/// needs because of what is in it, like TypeSafe's images switch, and
+/// which would be wrong on every other.
+pub(crate) async fn post_json_with<B: Serialize + ?Sized>(
+    http: &reqwest::Client,
+    url: &reqwest::Url,
+    body: &B,
+    headers: HeaderMap,
+) -> Result<reqwest::Response> {
+    let resp = http
+        .post(url.clone())
+        .headers(headers)
+        .json(body)
+        .send()
+        .await?;
     let status = resp.status();
     if status.is_success() {
         return Ok(resp);

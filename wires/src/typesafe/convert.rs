@@ -14,7 +14,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Answer, Error, Judgement, Question, Result, Usage, Verdict, http};
+use crate::image::{self, Format};
+use crate::{Answer, Error, Image, Judgement, Question, Result, Usage, Verdict, http};
 
 use super::WIRE;
 
@@ -26,6 +27,30 @@ pub(crate) struct Request<'a> {
     pub(crate) state: &'a Value,
     pub(crate) model: &'a str,
     pub(crate) questions: BTreeMap<&'a str, WireQuestion<'a>>,
+    /// Left out when there are none, so a request without images is the
+    /// bytes it always was.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) assets: BTreeMap<&'a str, WireAsset<'a>>,
+}
+
+impl Request<'_> {
+    /// Whether the request must carry `TypeSafe-Danger-Zone-Images: true`:
+    /// it has an image, or a box question, which the server refuses with a
+    /// 400 without the header.
+    pub(crate) fn needs_images(&self) -> bool {
+        !self.assets.is_empty() || self.questions.values().any(|q| q.kind == "box")
+    }
+}
+
+/// One image, as JSON with base64: the bytes as sent, and the format read
+/// from them. Multipart would save the third base64 adds; at the sizes the
+/// wire allows (1568 px a side) it has not been worth a second encoding.
+#[derive(Debug, Serialize)]
+pub(crate) struct WireAsset<'a> {
+    #[serde(rename = "type")]
+    pub(crate) kind: &'static str,
+    pub(crate) format: &'static str,
+    pub(crate) data_base64: &'a str,
 }
 
 /// One question, tagged by `type`. `instructions` is optional on the wire
@@ -89,6 +114,7 @@ pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<
                 }
                 (instructions, Some(Criteria::Choice(options)))
             }
+            Question::Box { instructions } => (instructions, None),
             Question::Score {
                 instructions,
                 levels,
@@ -118,7 +144,125 @@ pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<
         state: &req.state,
         model,
         questions,
+        assets: assets(req)?,
     })
+}
+
+/// The documented limits on a reference and an image, checked here so that
+/// the 400 a caller would get — "Invalid image dimensions.", for any of six
+/// reasons — arrives instead as the reason and the reference it is about.
+const MAX_REFERENCE: usize = 1024;
+const MAX_REFERENCES: usize = 65_536;
+const MAX_FILE: usize = 16 * 1024 * 1024;
+const SIDE: std::ops::RangeInclusive<u32> = 280..=1568;
+
+fn assets(req: &Judgement) -> Result<BTreeMap<&str, WireAsset<'_>>> {
+    let invalid = |what: String| Error::Invalid { wire: WIRE, what };
+    let total: usize = req.assets.keys().map(String::len).sum();
+    if total > MAX_REFERENCES {
+        return Err(invalid(format!(
+            "the asset references come to {total} bytes, over {MAX_REFERENCES}"
+        )));
+    }
+    let mut text = Vec::new();
+    strings(&req.state, &mut text);
+    for q in req.questions.values() {
+        match q {
+            Question::Noul {
+                instructions,
+                yes,
+                no,
+            } => {
+                for v in [instructions, yes, no] {
+                    strings(v, &mut text);
+                }
+            }
+            Question::Choice {
+                instructions,
+                options,
+            } => {
+                strings(instructions, &mut text);
+                // The labels are object keys, which the server does not
+                // replace: only the descriptions count.
+                for v in options.values() {
+                    strings(v, &mut text);
+                }
+            }
+            Question::Score {
+                instructions,
+                levels,
+            } => {
+                strings(instructions, &mut text);
+                for v in levels {
+                    strings(v, &mut text);
+                }
+            }
+            Question::Box { instructions } => strings(instructions, &mut text),
+        }
+    }
+
+    let mut out = BTreeMap::new();
+    for (reference, img) in &req.assets {
+        let asset = |what: &str| invalid(format!("asset {reference:?}: {what}"));
+        if reference.trim().is_empty() {
+            return Err(asset("a reference cannot be empty"));
+        }
+        if reference.len() > MAX_REFERENCE {
+            return Err(asset(&format!(
+                "a reference is at most {MAX_REFERENCE} bytes, this one {}",
+                reference.len()
+            )));
+        }
+        if !text.iter().any(|t| t.contains(reference.as_str())) {
+            return Err(asset(
+                "not referenced in the state, an instruction or a criterion",
+            ));
+        }
+        out.insert(reference.as_str(), wire_asset(img).map_err(|e| asset(&e))?);
+    }
+    Ok(out)
+}
+
+fn wire_asset(img: &Image) -> std::result::Result<WireAsset<'_>, String> {
+    let (_, data) = img
+        .base64_parts()
+        .ok_or("a data URL that is not base64; the wire takes PNG or JPEG bytes")?;
+    let bytes =
+        image::decode(data).ok_or("not standard base64 (the alphabet, padded, no whitespace)")?;
+    if bytes.len() > MAX_FILE {
+        return Err(format!(
+            "{} bytes, over the 16 MiB a file may be",
+            bytes.len()
+        ));
+    }
+    let (format, width, height) =
+        image::dimensions(&bytes).ok_or("not a PNG or a JPEG, the only images the wire takes")?;
+    // Refused and not resized: the server documents that it never resizes,
+    // and resizing here would take an image library. The bounds on the
+    // area follow from these, 280² to 1568².
+    if !SIDE.contains(&width) || !SIDE.contains(&height) {
+        return Err(format!(
+            "{width} × {height} pixels; each side must be 280 to 1568 — scale or pad it first"
+        ));
+    }
+    Ok(WireAsset {
+        kind: "image",
+        format: match format {
+            Format::Png => "png",
+            Format::Jpeg => "jpg",
+        },
+        data_base64: data,
+    })
+}
+
+/// Every string in a value, where the server looks for references.
+fn strings<'a>(v: &'a Value, out: &mut Vec<&'a str>) {
+    match v {
+        Value::String(s) => out.push(s),
+        Value::Array(items) => items.iter().for_each(|i| strings(i, out)),
+        Value::Object(map) => map.values().for_each(|i| strings(i, out)),
+        _ => {}
+    }
 }
 
 // ----------------------------------------------------------------- response
@@ -144,6 +288,16 @@ struct WireAnswer {
     score: Option<f64>,
     confidence: Option<f64>,
     probabilities: Option<BTreeMap<String, f64>>,
+    #[serde(rename = "box")]
+    edges: Option<Edges>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Edges {
+    top: f64,
+    bottom: f64,
+    left: f64,
+    right: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -234,6 +388,17 @@ fn answer(name: &str, question: &Question, got: &WireAnswer) -> Result<Answer> {
                 score: got.score.ok_or_else(|| field("score"))?,
                 probabilities,
                 confidence: got.confidence.ok_or_else(|| field("confidence"))?,
+            }
+        }
+        Question::Box { .. } => {
+            let e = got.edges.as_ref().ok_or_else(|| field("box"))?;
+            Answer::Box {
+                top: e.top,
+                bottom: e.bottom,
+                left: e.left,
+                right: e.right,
+                // Nullable on the wire: a box with no confidence is still a box.
+                confidence: got.confidence,
             }
         }
     })

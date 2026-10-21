@@ -51,11 +51,34 @@ struct WireMessage {
     /// Omitted only on an assistant turn that is nothing but tool calls;
     /// present, possibly empty, everywhere else.
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<Content>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     tool_calls: Vec<WireToolCall>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
+}
+
+/// A turn's content: the plain string every turn without an image sends,
+/// so that those bytes do not move, or parts when it shows an image.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum Content {
+    Text(String),
+    Parts(Vec<Part>),
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "type")]
+enum Part {
+    #[serde(rename = "image_url")]
+    ImageUrl { image_url: ImageUrl },
+    #[serde(rename = "text")]
+    Text { text: String },
+}
+
+#[derive(Debug, Serialize)]
+struct ImageUrl {
+    url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -110,7 +133,7 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Request {
     if !req.system.is_empty() {
         messages.push(WireMessage {
             role: Role::System.as_str(),
-            content: Some(req.system),
+            content: Some(Content::Text(req.system)),
             tool_calls: Vec::new(),
             tool_call_id: None,
         });
@@ -121,8 +144,22 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Request {
             role: m.role.as_str(),
             content: if has_calls && m.content.is_empty() {
                 None
+            } else if m.images.is_empty() {
+                Some(Content::Text(m.content))
             } else {
-                Some(m.content)
+                // Images first, then the text: OpenAI's own examples' order,
+                // and Anthropic's, so one turn reads the same on both.
+                let mut parts: Vec<Part> = m
+                    .images
+                    .iter()
+                    .map(|img| Part::ImageUrl {
+                        image_url: ImageUrl {
+                            url: img.data_url().into_owned(),
+                        },
+                    })
+                    .collect();
+                parts.push(Part::Text { text: m.content });
+                Some(Content::Parts(parts))
             },
             tool_calls: m
                 .tool_calls
@@ -249,6 +286,7 @@ pub(crate) fn response(text: &str) -> Result<ChatResponse> {
         message: Message {
             role: Role::Assistant,
             content: choice.message.content.unwrap_or_default(),
+            images: Vec::new(),
             tool_calls: tool_calls.clone(),
             tool_call_id: None,
         },
