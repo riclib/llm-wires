@@ -718,13 +718,23 @@ mod tests {
             serde_json::json!([{"type": "text", "text": "It is 10:00."}])
         );
 
-        // Empty: byte-identical to a request that never had the field.
+        // Empty: the 0.4 shape, exactly — one system block carrying the
+        // breakpoint, and no empty block after it.
         assert_eq!(
             build(ChatRequest {
                 system_volatile: String::new(),
+                cache_stable_prefix: true,
                 ..ChatRequest::ask("You are terse.", "hi")
             }),
-            build(ChatRequest::ask("You are terse.", "hi"))
+            serde_json::json!({
+                "model": "claude-sonnet-4",
+                "max_tokens": DEFAULT_MAX_TOKENS,
+                "system": [{"type": "text", "text": "You are terse.",
+                            "cache_control": {"type": "ephemeral"}}],
+                "messages": [
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                ],
+            })
         );
     }
 

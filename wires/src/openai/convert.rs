@@ -399,12 +399,14 @@ mod tests {
         );
         assert_eq!(
             json(request(req("You are terse.", ""), "gpt-4o", false)),
-            json(request(
-                ChatRequest::ask("You are terse.", "hi"),
-                "gpt-4o",
-                false
-            )),
-            "an empty volatile part sends nothing"
+            serde_json::json!({
+                "model": "gpt-4o",
+                "messages": [
+                    {"role": "system", "content": "You are terse."},
+                    {"role": "user", "content": "hi"},
+                ],
+            }),
+            "an empty volatile part sends nothing: the 0.4 shape, exactly"
         );
     }
 

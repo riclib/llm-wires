@@ -168,6 +168,20 @@ pub struct ChatRequest {
     /// is appended to the system message, one blank line after the stable
     /// text, so the stable text still leads. Empty sends nothing, and the
     /// request is byte-identical to one that never had the field.
+    ///
+    /// **It is still ahead of `messages`**, on both wires, so the transcript
+    /// behind it is not part of any reusable prefix: on OpenAI it ends the
+    /// server-side match before the first message. Per-request text that has
+    /// a user turn to ride belongs on that turn; this field is for the text
+    /// that has to stay in the system prompt.
+    ///
+    /// **A `Role::System` message in the transcript lands on different sides
+    /// of it.** Anthropic hoists such a message into its system blocks, on
+    /// the stable side — stable, hoisted, then volatile — because a breakpoint
+    /// behind the volatile block would never hit. OpenAI has no field to
+    /// hoist into and sends that message where it stands in the transcript,
+    /// after the system message that carries this one. Each wire keeps the
+    /// placement it already had for those messages.
     pub system_volatile: String,
     /// Ask the provider to cache the stable prefix (system prompt + tool
     /// definitions). Only Anthropic acts on it — OpenAI and its compatibles

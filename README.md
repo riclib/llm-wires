@@ -53,7 +53,10 @@ or a "deployment" is; those belong to whoever is calling.
   same bytes across requests; `system_volatile` is what changes — a clock, the
   record in hand. Anthropic sends it as a block of its own after the
   breakpoint; OpenAI appends it to the system message after the stable text.
-  Either way the volatile part never sits inside the prefix a cache reuses.
+  Either way the volatile part never sits inside the stable prefix — but it is
+  still ahead of `messages`, so the transcript behind it is not part of any
+  reusable prefix. Per-request text that has a user turn to ride belongs on
+  that turn.
 - **`ring`, not `aws-lc-rs`.** TLS is `rustls` with `rustls-no-provider` and a
   preconfigured config, so a binary that already ships `ring` does not end up
   linking two crypto backends.
