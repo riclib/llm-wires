@@ -406,7 +406,7 @@ mod tests {
                     {"role": "user", "content": "hi"},
                 ],
             }),
-            "an empty volatile part sends nothing: the 0.4 shape, exactly"
+            "an empty volatile part sends nothing: the shape without the field, exactly"
         );
     }
 

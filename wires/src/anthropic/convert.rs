@@ -718,7 +718,7 @@ mod tests {
             serde_json::json!([{"type": "text", "text": "It is 10:00."}])
         );
 
-        // Empty: the 0.4 shape, exactly — one system block carrying the
+        // Empty: the shape without the field, exactly — one system block carrying the
         // breakpoint, and no empty block after it.
         assert_eq!(
             build(ChatRequest {

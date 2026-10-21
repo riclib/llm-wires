@@ -54,7 +54,10 @@ async fn jev_sees_red_and_finds_the_blue_square() {
     let v = judge("jev-preview")
         .judge(
             Judgement::of(json!({"photo": "ref-7b3f4c5d-square"}))
-                .image("ref-7b3f4c5d-square", Image::from_bytes("image/png", BLUE_SQUARE))
+                .image(
+                    "ref-7b3f4c5d-square",
+                    Image::from_bytes("image/png", BLUE_SQUARE),
+                )
                 .ask("square", Question::locate("the blue square in `photo`")),
         )
         .await
