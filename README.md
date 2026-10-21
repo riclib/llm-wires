@@ -33,7 +33,7 @@ nothing above that. No agent loop, no memory, no notion of what a "model card"
 or a "deployment" is; those belong to whoever is calling.
 
 - **Two shapes, one type.** `ChatRequest` carries `messages`, `tools`,
-  `tool_choice`, `system`, `temperature`, `max_tokens` and
+  `tool_choice`, `system`, `system_volatile`, `temperature`, `max_tokens` and
   `cache_stable_prefix`. Anthropic gets a `system` field and `tool_use` content
   blocks; OpenAI gets a leading system message and `tool_calls`. The caller
   writes it once.
@@ -49,6 +49,11 @@ or a "deployment" is; those belong to whoever is calling.
   prompt and tool definitions. Anthropic acts on it; OpenAI caches prefixes
   server-side with no flag, so on that wire it is read and deliberately
   ignored, and the request is byte-identical either way.
+- **A stable system prompt and a volatile one.** `system` is what stays the
+  same bytes across requests; `system_volatile` is what changes — a clock, the
+  record in hand. Anthropic sends it as a block of its own after the
+  breakpoint; OpenAI appends it to the system message after the stable text.
+  Either way the volatile part never sits inside the prefix a cache reuses.
 - **`ring`, not `aws-lc-rs`.** TLS is `rustls` with `rustls-no-provider` and a
   preconfigured config, so a binary that already ships `ring` does not end up
   linking two crypto backends.

@@ -153,7 +153,22 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     /// The system prompt. Wires that have no system role put it first as a
     /// system message; wires that do (Anthropic) put it in its own field.
+    ///
+    /// This is the **stable** part: what stays the same bytes from one
+    /// request to the next, which is what a prompt cache can reuse. Anything
+    /// that changes per request goes in [`ChatRequest::system_volatile`].
     pub system: String,
+    /// **The part of the system prompt that changes per request** — a clock,
+    /// the record being processed — sent after [`ChatRequest::system`].
+    ///
+    /// Every provider caches by prefix, so volatile text inside the cached
+    /// part costs the cache everything behind it. On Anthropic it is a system
+    /// block of its own after the `cache_control` breakpoint, which
+    /// `cache_stable_prefix` stamps on the last *stable* block; on OpenAI it
+    /// is appended to the system message, one blank line after the stable
+    /// text, so the stable text still leads. Empty sends nothing, and the
+    /// request is byte-identical to one that never had the field.
+    pub system_volatile: String,
     /// Ask the provider to cache the stable prefix (system prompt + tool
     /// definitions). Only Anthropic acts on it — OpenAI and its compatibles
     /// cache prefixes server-side with no flag — so on the OpenAI wire this

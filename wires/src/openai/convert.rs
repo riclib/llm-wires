@@ -129,11 +129,18 @@ struct NamedTool {
 /// where it becomes a `cache_control` breakpoint.
 pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Request {
     let mut messages = Vec::with_capacity(req.messages.len() + 1);
-    // This wire has no system field: the system prompt is the first message.
-    if !req.system.is_empty() {
+    // This wire has no system field: the system prompt is the first message,
+    // the stable part leading so the server-side prefix match reaches past
+    // it, and the volatile part after one blank line.
+    let system = [req.system, req.system_volatile]
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if !system.is_empty() {
         messages.push(WireMessage {
             role: Role::System.as_str(),
-            content: Some(Content::Text(req.system)),
+            content: Some(Content::Text(system)),
             tool_calls: Vec::new(),
             tool_call_id: None,
         });
@@ -371,6 +378,37 @@ mod tests {
     }
 
     #[test]
+    fn the_volatile_system_text_follows_the_stable_text_in_one_message() {
+        // One system message, the stable part first: the server-side prefix
+        // match runs from the front, so the stable text still caches whatever
+        // follows it. Each half alone is sent as it is.
+        let req = |stable: &str, volatile: &str| ChatRequest {
+            messages: vec![Message::user("hi")],
+            system: stable.into(),
+            system_volatile: volatile.into(),
+            ..ChatRequest::default()
+        };
+        let system = |r: ChatRequest| json(request(r, "gpt-4o", false))["messages"][0].clone();
+        assert_eq!(
+            system(req("You are terse.", "It is 10:00.")),
+            serde_json::json!({"role": "system", "content": "You are terse.\n\nIt is 10:00."})
+        );
+        assert_eq!(
+            system(req("", "It is 10:00.")),
+            serde_json::json!({"role": "system", "content": "It is 10:00."})
+        );
+        assert_eq!(
+            json(request(req("You are terse.", ""), "gpt-4o", false)),
+            json(request(
+                ChatRequest::ask("You are terse.", "hi"),
+                "gpt-4o",
+                false
+            )),
+            "an empty volatile part sends nothing"
+        );
+    }
+
+    #[test]
     fn a_tool_turn_round_trips_through_the_wires_shape() {
         let req = ChatRequest {
             messages: vec![
@@ -391,6 +429,7 @@ mod tests {
             temperature: Some(0.2),
             max_tokens: Some(256),
             system: String::new(),
+            system_volatile: String::new(),
             cache_stable_prefix: true,
         };
         let out = json(request(req, "gpt-4o", false));
