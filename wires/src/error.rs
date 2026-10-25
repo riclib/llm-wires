@@ -29,8 +29,8 @@ pub enum Error {
     },
 
     /// A wire asked for the trait it does not speak: [`crate::build`] on the
-    /// TypeSafe wire, which cannot chat, or [`crate::build_judge`] on a chat
-    /// wire, which cannot judge. A separate trait was the point — one
+    /// TypeSafe wire, which cannot chat, or [`crate::build_judge`] on Anthropic,
+    /// Azure or Workers AI, which do not judge. A separate trait was the point — one
     /// interface would have forced a method that always errors — so the
     /// refusal happens once, at `build`, and not on every call.
     #[error("the {wire} wire cannot {verb}")]
@@ -127,6 +127,16 @@ pub enum Error {
     /// the head said 200 and the body changed its mind.
     #[error("the provider ended the stream: {message}")]
     Stream { message: String },
+
+    /// A 200 in which the model declined to decide one or more questions:
+    /// OpenAI's Decisions API answers each with `{"type": "refusal"}` while
+    /// answering the rest. A verdict has no holes, so the whole judgement
+    /// fails, naming every refused question by the caller's name.
+    #[error("{wire}: the model refused to decide {}", .questions.join(", "))]
+    Refused {
+        wire: &'static str,
+        questions: Vec<String>,
+    },
 
     /// A 2xx, or a stream frame, that is not the shape the wire promises.
     #[error("the provider's reply did not parse: {0}")]

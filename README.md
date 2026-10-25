@@ -143,6 +143,45 @@ The same `Image` goes on a chat turn: `Message::user(…).with_images([…])`
 sends Anthropic `image` blocks and OpenAI `image_url` parts, before the
 text. Only a user turn may carry one.
 
+## `Judge`: OpenAI's Decisions API
+
+The OpenAI wire judges too: `build_judge` on `Wire::openai` posts to
+`{endpoint}/decisions`, the way `build_embed` reaches `/embeddings` on the same
+wire. The deployment says which body (`gpt-6-luna` is the only decision model
+at the writing), and the `Judgement` and `Verdict` are the TypeSafe ones, so a
+caller swaps judges by swapping the wire.
+
+```rust
+let judge = llm_wires::build_judge(
+    Wire::openai("https://api.openai.com/v1", "gpt-6-luna"),
+    Some(wire_secret::Secret::from("sk-…")),
+)?;
+// the same Judgement as above, the same Verdict back
+```
+
+| question | `/v1/decisions` | answer |
+|---|---|---|
+| `noul` | `predicate` | `probability` as `Answer::Noul { yes }` |
+| `choice` | `choice`, `choices: [{value, description}]` | the pick, every option's probability, `confidence` |
+| `score` | `score`, `levels: [{label, description}]`, 2 to 10 | the weighted index, one probability per level, `confidence` |
+| `box` | none | refused before the socket (`Error::Invalid`) |
+
+- **The distribution is kept**, as on TypeSafe: nothing collapses an answer to
+  its top option.
+- **The caller's question names never reach the model**: questions go out as
+  `q0`, `q1`, … and come back under the caller's names.
+- **A refusal is `Error::Refused`**, naming every question the model declined.
+  The API answers a declined question with `{"type": "refusal"}` beside the
+  others, and a verdict has no holes.
+- A JSON state goes in as an `input_json` part. Images go in the same user
+  message, each after a text part holding its reference. A noul's described
+  outcomes become further instruction parts, since a predicate has no
+  criteria of its own.
+- No retries, no thresholds, `Error::Api` with OpenAI's `code` and
+  `x-request-id`, a 429's `retry-after` surfaced. Pinned against replies
+  recorded live on 2026-10-25 (`tests/decisions.rs`), and
+  `tests/decisions_live.rs` makes the round trip by hand.
+
 ## `Embed`: vectors
 
 An embedding deployment does not chat either, so it is a third trait behind the
