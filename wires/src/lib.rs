@@ -90,7 +90,9 @@
 //! would force every implementation to carry methods that always error. The
 //! switch stays one — `Wire` names every wire — and the trait a wire speaks is
 //! decided at [`build`], [`build_judge`], [`build_embed`] or
-//! [`build_extract`], once.
+//! [`build_extract`], once. One wire may speak several: the OpenAI wire
+//! chats, embeds and — through the Decisions API — judges, each a different
+//! deployment, and which one a client is was the caller's choice of `build`.
 //!
 //! ## What this crate is not
 //!
@@ -424,8 +426,9 @@ pub fn build(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Provider>> {
     }
 }
 
-/// The switch over wires that judge. One arm today; the shape is the same as
-/// [`build`]'s so that a second judging wire is an arm and not a redesign.
+/// The switch over wires that judge: TypeSafe's System One, and OpenAI's
+/// Decisions API on the OpenAI wire (`POST {endpoint}/decisions`, the way
+/// [`build_embed`] reaches `/embeddings` on the same wire).
 ///
 /// The key rule is [`build`]'s: `None` is refused, every wire authenticates.
 pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
@@ -443,13 +446,25 @@ pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
                 &endpoint, &model, &headers, &key,
             )?))
         }
-        Wire::OpenAi { .. }
-        | Wire::Azure { .. }
-        | Wire::Anthropic { .. }
-        | Wire::WorkersAi { .. } => Err(Error::Cannot {
-            wire: name,
-            verb: "judge",
-        }),
+        // OpenAI's Decisions API: the OpenAI wire's third body, beside chat
+        // and embeddings (`openai/decisions.rs`).
+        Wire::OpenAi {
+            endpoint,
+            model,
+            headers,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "model", &model)?;
+            Ok(Box::new(openai::Decisions::openai(
+                &endpoint, &model, &headers, &key,
+            )?))
+        }
+        Wire::Azure { .. } | Wire::Anthropic { .. } | Wire::WorkersAi { .. } => {
+            Err(Error::Cannot {
+                wire: name,
+                verb: "judge",
+            })
+        }
     }
 }
 
@@ -600,8 +615,16 @@ mod tests {
             }
             other => panic!("expected Cannot, got {:?}", other.err()),
         }
+        // OpenAI judges through its Decisions API; the deployment says
+        // which body, as it says embeddings on the same wire.
+        assert!(
+            build_judge(
+                Wire::openai("https://api.openai.com/v1", "gpt-6-luna"),
+                Some(Secret::from("k"))
+            )
+            .is_ok()
+        );
         for wire in [
-            Wire::openai("https://api.openai.com/v1", "gpt-4o"),
             Wire::anthropic("https://api.anthropic.com", "claude-sonnet-4"),
             Wire::Azure {
                 endpoint: "https://x.openai.azure.com".into(),

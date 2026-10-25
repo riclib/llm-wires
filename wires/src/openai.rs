@@ -19,9 +19,11 @@
 //! models need it — a later ticket).
 
 mod convert;
+mod decisions;
 mod embeddings;
 mod stream;
 
+pub(crate) use decisions::Decisions;
 pub(crate) use embeddings::Embeddings;
 
 use async_trait::async_trait;
