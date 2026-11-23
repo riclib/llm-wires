@@ -130,6 +130,7 @@ pub(crate) async fn post_json_with<B: Serialize + ?Sized>(
 
 /// The provider's id for the exchange. Each wire spells the header its own
 /// way; the first one present wins, and none is a request id of `None`.
+/// OpenRouter's is `x-generation-id`, on a refusal as on an answer.
 /// Cloudflare has no request id of its own and `cf-ray` is what its support
 /// asks for, so it is last: behind a Cloudflare-fronted provider that has
 /// its own, the provider's wins.
@@ -138,6 +139,7 @@ fn request_id(headers: &HeaderMap) -> Option<String> {
         "x-typesafe-request-id",
         "request-id",
         "x-request-id",
+        "x-generation-id",
         "cf-ray",
     ]
     .into_iter()
@@ -500,6 +502,15 @@ mod tests {
         assert_eq!(request_id(&h), None);
         h.insert("cf-ray", HeaderValue::from_static("8f1d2c3b4a5e6f70-LIS"));
         assert_eq!(request_id(&h).as_deref(), Some("8f1d2c3b4a5e6f70-LIS"));
+        // OpenRouter's own id wins over the Cloudflare ray in front of it.
+        h.insert(
+            "x-generation-id",
+            HeaderValue::from_static("gen-dec-1795422771-wKL3C8JmmOO5LFIp3mP1"),
+        );
+        assert_eq!(
+            request_id(&h).as_deref(),
+            Some("gen-dec-1795422771-wKL3C8JmmOO5LFIp3mP1")
+        );
         h.insert("x-request-id", HeaderValue::from_static("req_openai"));
         assert_eq!(request_id(&h).as_deref(), Some("req_openai"));
         h.insert("request-id", HeaderValue::from_static("req_anthropic"));

@@ -398,6 +398,8 @@ pub(crate) fn response(
     let usage = resp.usage.unwrap_or_default();
     let details = usage.input_tokens_details.unwrap_or_default();
     Ok(Verdict {
+        // The Decisions API reports tokens and no money.
+        cost: None,
         model: resp.model,
         answers,
         usage: Usage {

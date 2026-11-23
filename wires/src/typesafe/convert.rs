@@ -17,8 +17,6 @@ use serde_json::Value;
 use crate::image::{self, Format};
 use crate::{Answer, Error, Image, Judgement, Question, Result, Usage, Verdict, http};
 
-use super::WIRE;
-
 // ------------------------------------------------------------------ request
 
 /// `POST /v1/systemone`.
@@ -84,10 +82,16 @@ pub(crate) enum Criteria<'a> {
     Score(&'a [Value]),
 }
 
-pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<'a>> {
+/// `wire` is the name the errors carry: `typesafe`, or `openrouter_decisions`
+/// for the same body at OpenRouter.
+pub(crate) fn request<'a>(
+    req: &'a Judgement,
+    model: &'a str,
+    wire: &'static str,
+) -> Result<Request<'a>> {
     if req.questions.is_empty() {
         return Err(Error::Invalid {
-            wire: WIRE,
+            wire,
             what: "a judgement needs at least one question".into(),
         });
     }
@@ -108,7 +112,7 @@ pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<
             } => {
                 if options.is_empty() {
                     return Err(Error::Invalid {
-                        wire: WIRE,
+                        wire,
                         what: format!("question {name:?}: a choice needs at least one option"),
                     });
                 }
@@ -121,7 +125,7 @@ pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<
             } => {
                 if levels.len() < 2 {
                     return Err(Error::Invalid {
-                        wire: WIRE,
+                        wire,
                         what: format!(
                             "question {name:?}: a score needs at least two levels, got {}",
                             levels.len()
@@ -144,7 +148,7 @@ pub(crate) fn request<'a>(req: &'a Judgement, model: &'a str) -> Result<Request<
         state: &req.state,
         model,
         questions,
-        assets: assets(req)?,
+        assets: assets(req, wire)?,
     })
 }
 
@@ -156,8 +160,8 @@ const MAX_REFERENCES: usize = 65_536;
 const MAX_FILE: usize = 16 * 1024 * 1024;
 const SIDE: std::ops::RangeInclusive<u32> = 280..=1568;
 
-fn assets(req: &Judgement) -> Result<BTreeMap<&str, WireAsset<'_>>> {
-    let invalid = |what: String| Error::Invalid { wire: WIRE, what };
+fn assets<'a>(req: &'a Judgement, wire: &'static str) -> Result<BTreeMap<&'a str, WireAsset<'a>>> {
+    let invalid = |what: String| Error::Invalid { wire, what };
     let total: usize = req.assets.keys().map(String::len).sum();
     if total > MAX_REFERENCES {
         return Err(invalid(format!(
@@ -306,13 +310,21 @@ struct WireUsage {
     input_tokens: u32,
     #[serde(default)]
     output_tokens: u32,
+    /// What the call billed, in US dollars. OpenRouter sends it; TypeSafe's
+    /// own API does not, and it stays `None` there.
+    cost: Option<f64>,
 }
 
-pub(crate) fn response(text: &str, asked: &BTreeMap<String, Question>) -> Result<Verdict> {
+pub(crate) fn response(
+    text: &str,
+    asked: &BTreeMap<String, Question>,
+    wire: &'static str,
+) -> Result<Verdict> {
     let resp: Response = serde_json::from_str(text)
         .map_err(|e| Error::Decode(format!("{e} in {}", http::clip(text))))?;
 
     let mut answers = BTreeMap::new();
+    let mut refused = Vec::new();
     for (name, question) in asked {
         let Some(got) = resp.answers.get(name) else {
             return Err(Error::Decode(format!(
@@ -320,6 +332,13 @@ pub(crate) fn response(text: &str, asked: &BTreeMap<String, Question>) -> Result
                 http::clip(text)
             )));
         };
+        // A question the model will not decide, answered beside the others.
+        // Read before the kind check, which would call it a mismatch: it is
+        // a refusal, and the verdict must not come back with a hole in it.
+        if got.kind == "refusal" {
+            refused.push(name.clone());
+            continue;
+        }
         if got.kind != question.kind() {
             return Err(Error::Decode(format!(
                 "question {name:?} is a {} and was answered as a {:?}",
@@ -331,10 +350,17 @@ pub(crate) fn response(text: &str, asked: &BTreeMap<String, Question>) -> Result
     }
     // An answer to a question nobody asked is ignored, not an error: a
     // server that adds one must not end a step, and the caller reads by name.
+    if !refused.is_empty() {
+        return Err(Error::Refused {
+            wire,
+            questions: refused,
+        });
+    }
 
     Ok(Verdict {
         model: resp.model,
         answers,
+        cost: resp.usage.as_ref().and_then(|u| u.cost),
         usage: resp
             .usage
             .map(|u| Usage {
@@ -435,7 +461,7 @@ mod tests {
     #[test]
     fn the_request_is_the_sdks_payload() {
         let req = asked();
-        let body = serde_json::to_value(request(&req, "jev-latest").unwrap()).unwrap();
+        let body = serde_json::to_value(request(&req, "jev-latest", "typesafe").unwrap()).unwrap();
         assert_eq!(
             body,
             json!({
@@ -475,7 +501,7 @@ mod tests {
                 Value::Null,
             ),
         );
-        let body = serde_json::to_value(request(&req, "jev-latest").unwrap()).unwrap();
+        let body = serde_json::to_value(request(&req, "jev-latest", "typesafe").unwrap()).unwrap();
         assert_eq!(
             body["state"],
             json!({"messages": [{"role": "user", "text": "hi"}]})
@@ -490,7 +516,7 @@ mod tests {
         );
         // No instructions at all is allowed, and is the field left out.
         let req = Judgement::of("x").ask("q", Question::noul(Value::Null));
-        let body = serde_json::to_value(request(&req, "m").unwrap()).unwrap();
+        let body = serde_json::to_value(request(&req, "m", "typesafe").unwrap()).unwrap();
         assert_eq!(body["questions"]["q"], json!({"type": "noul"}));
     }
 
@@ -508,7 +534,7 @@ mod tests {
             ),
         ];
         for (req, want) in cases {
-            match request(&req, "m") {
+            match request(&req, "m", "typesafe") {
                 Err(Error::Invalid { wire, what }) => {
                     assert_eq!(wire, "typesafe");
                     assert!(what.contains(want), "{what}");
@@ -520,7 +546,7 @@ mod tests {
 
     #[test]
     fn the_response_comes_back_typed_under_the_callers_names() {
-        let v = response(ANSWERS, &asked().questions).unwrap();
+        let v = response(ANSWERS, &asked().questions, "typesafe").unwrap();
         assert_eq!(v.model, "jev-latest");
         assert_eq!(
             v.usage,
@@ -593,7 +619,7 @@ mod tests {
             ("<html>ok</html>", "expected value"),
         ];
         for (body, want) in cases {
-            match response(body, &asked) {
+            match response(body, &asked, "typesafe") {
                 Err(Error::Decode(why)) => assert!(why.contains(want), "{why}"),
                 other => panic!("expected Decode {want:?}, got {other:?}"),
             }
@@ -605,7 +631,7 @@ mod tests {
         let asked = Judgement::of("x")
             .ask("is_urgent", Question::noul("?"))
             .questions;
-        let v = response(ANSWERS, &asked).unwrap();
+        let v = response(ANSWERS, &asked, "typesafe").unwrap();
         assert_eq!(v.answers.len(), 1);
         assert_eq!(v.answers["is_urgent"], Answer::Noul { yes: 0.92 });
     }

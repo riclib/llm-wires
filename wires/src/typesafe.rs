@@ -27,6 +27,10 @@ use crate::{Headers, Info, Judge, Judgement, Result, Verdict, http};
 
 pub(crate) const WIRE: &str = "typesafe";
 
+/// The same body at OpenRouter's Decisions API, which speaks System One field
+/// for field at `{endpoint}/decisions`.
+pub(crate) const OPENROUTER: &str = "openrouter_decisions";
+
 /// What this crate calls itself to their server, where their SDK sends
 /// `typesafe-sdk/<version>`. The same string on `User-Agent` and on
 /// `X-TypeSafe-SDK`, as theirs is.
@@ -46,6 +50,12 @@ const IMAGES_HEADER: HeaderName = HeaderName::from_static("typesafe-danger-zone-
 /// those headers.
 pub(crate) struct TypeSafe {
     http: reqwest::Client,
+    /// `typesafe` or `openrouter_decisions`, for [`Info`] and every error.
+    wire: &'static str,
+    /// Whether a request with an image or a box carries TypeSafe's images
+    /// switch. OpenRouter answered both without it on 2026-11-23, and takes
+    /// no `TypeSafe-*` header of ours.
+    images_header: bool,
     /// The full URL, built once at construction.
     url: reqwest::Url,
     model: String,
@@ -81,6 +91,42 @@ impl TypeSafe {
         map.insert(AUTHORIZATION, http::key_header(WIRE, key, "Bearer ")?);
         Ok(TypeSafe {
             http: http::client(map)?,
+            wire: WIRE,
+            images_header: true,
+            url,
+            model: model.to_string(),
+            endpoint: endpoint.to_string(),
+        })
+    }
+
+    /// OpenRouter's Decisions API: `POST {endpoint}/decisions`, the body and
+    /// the answers System One's, the key a bearer. The model is OpenRouter's
+    /// name for a decider — `typesafe/jev-1.14`, `cloudflare/clef-flash`,
+    /// `openai/gpt-6-luna-decisions` — and OpenRouter routes to whichever
+    /// provider serves it.
+    ///
+    /// Nothing of TypeSafe's SDK goes on: no `X-TypeSafe-*`, which this
+    /// crate is not to OpenRouter, and no images switch, which it does not
+    /// need. The operator's headers go first and the key last, as on every
+    /// wire.
+    pub(crate) fn openrouter(
+        endpoint: &str,
+        model: &str,
+        headers: &Headers,
+        key: &Secret,
+    ) -> Result<TypeSafe> {
+        let url = http::join(endpoint, "decisions", None)?;
+        let mut map = http::extra(OPENROUTER, headers)?;
+        for (name, value) in [(ACCEPT, "application/json"), (USER_AGENT, IDENT)] {
+            if !map.contains_key(&name) {
+                map.insert(name, HeaderValue::from_static(value));
+            }
+        }
+        map.insert(AUTHORIZATION, http::key_header(OPENROUTER, key, "Bearer ")?);
+        Ok(TypeSafe {
+            http: http::client(map)?,
+            wire: OPENROUTER,
+            images_header: false,
             url,
             model: model.to_string(),
             endpoint: endpoint.to_string(),
@@ -91,21 +137,21 @@ impl TypeSafe {
 #[async_trait]
 impl Judge for TypeSafe {
     async fn judge(&self, req: Judgement) -> Result<Verdict> {
-        let body = convert::request(&req, &self.model)?;
+        let body = convert::request(&req, &self.model, self.wire)?;
         let mut headers = HeaderMap::new();
-        if body.needs_images() {
+        if self.images_header && body.needs_images() {
             headers.insert(IMAGES_HEADER, HeaderValue::from_static("true"));
         }
         let text = http::post_json_with(&self.http, &self.url, &body, headers)
             .await?
             .text()
             .await?;
-        convert::response(&text, &req.questions)
+        convert::response(&text, &req.questions, self.wire)
     }
 
     fn info(&self) -> Info {
         Info {
-            wire: WIRE,
+            wire: self.wire,
             model: self.model.clone(),
             endpoint: self.endpoint.clone(),
         }
@@ -116,7 +162,7 @@ impl std::fmt::Debug for TypeSafe {
     /// Everything a log line may have, and nothing else.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TypeSafe")
-            .field("wire", &WIRE)
+            .field("wire", &self.wire)
             .field("model", &self.model)
             .field("url", &self.url.as_str())
             .finish()

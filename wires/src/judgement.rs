@@ -246,4 +246,9 @@ pub struct Verdict {
     /// `input` and `output`; the cache counters stay zero, the wire has no
     /// cache to report.
     pub usage: Usage,
+    /// What the call billed, in US dollars, when the provider says:
+    /// OpenRouter's `usage.cost`. `None` where the wire reports no money —
+    /// TypeSafe's own API, OpenAI's Decisions API — and never computed here
+    /// from tokens and a price list that goes stale.
+    pub cost: Option<f64>,
 }

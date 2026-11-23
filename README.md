@@ -182,6 +182,32 @@ let judge = llm_wires::build_judge(
   recorded live on 2026-10-25 (`tests/decisions.rs`), and
   `tests/decisions_live.rs` makes the round trip by hand.
 
+## `Judge`: OpenRouter's Decisions API
+
+OpenRouter's alpha Decisions API speaks System One field for field — the
+same `state`, the same map of questions, the same answers — so it is
+TypeSafe's converter at `{endpoint}/decisions`, one more arm of
+`build_judge`, routing to whichever provider serves the decider you name:
+
+```rust
+use llm_wires::{OPENROUTER_DECISIONS_ENDPOINT, Wire};
+
+let judge = llm_wires::build_judge(
+    Wire::openrouter_decisions(OPENROUTER_DECISIONS_ENDPOINT, "typesafe/jev-1.14"),
+    Some(wire_secret::Secret::from("sk-or-…")),
+)?;
+```
+
+`cloudflare/clef-flash` and `openai/gpt-6-luna-decisions` answer on the same
+wire. None of TypeSafe's SDK headers go out, and images and box questions
+pass without TypeSafe's images switch. OpenRouter reports what each call
+billed, and `Verdict::cost` carries it in dollars (about $0.00002 a call);
+on TypeSafe's own API, which reports none, it is `None`. A question a model
+answers with `{"type": "refusal"}` beside the others is `Error::Refused` on
+both System One wires — though when OpenAI's decider refused through
+OpenRouter on 2026-11-23, OpenRouter sent a 502 for the whole call instead,
+which stays `Error::Api` with OpenRouter's sentence and its `x-generation-id`.
+
 ## `Embed`: vectors
 
 An embedding deployment does not chat either, so it is a third trait behind the

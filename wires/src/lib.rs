@@ -285,6 +285,22 @@ pub enum Wire {
         model: String,
         headers: Headers,
     },
+    /// `POST {endpoint}/decisions` with a bearer key: OpenRouter's Decisions
+    /// API, which speaks System One field for field — the same body, the same
+    /// answers — so it is TypeSafe's converter at another path, a [`Judge`]
+    /// built with [`build_judge`]. The model is OpenRouter's name for a
+    /// decider: `typesafe/jev-1.14`, `cloudflare/clef-flash`,
+    /// `openai/gpt-6-luna-decisions`. OpenAI's own Decisions API is a
+    /// different shape, and is the [`Wire::OpenAi`] arm.
+    ///
+    /// The endpoint is required, as on every wire;
+    /// [`OPENROUTER_DECISIONS_ENDPOINT`] is the one OpenRouter publishes, for
+    /// the card to default to. Its `/alpha` is OpenRouter's and the operator's.
+    OpenRouterDecisions {
+        endpoint: String,
+        model: String,
+        headers: Headers,
+    },
     /// `POST {endpoint}/accounts/{account}/ai/run/{model}` with a bearer
     /// token: Cloudflare Workers AI's REST route, unwrapping Cloudflare's
     /// `{result, success, errors}` envelope. An [`Extract`] today, for Clairic
@@ -315,6 +331,7 @@ impl Wire {
             Wire::Azure { .. } => "azure",
             Wire::Anthropic { .. } => "anthropic",
             Wire::TypeSafe { .. } => typesafe::WIRE,
+            Wire::OpenRouterDecisions { .. } => typesafe::OPENROUTER,
             Wire::WorkersAi { .. } => workers_ai::WIRE,
         }
     }
@@ -346,6 +363,15 @@ impl Wire {
         }
     }
 
+    /// The common case for OpenRouter's Decisions API.
+    pub fn openrouter_decisions(endpoint: impl Into<String>, model: impl Into<String>) -> Wire {
+        Wire::OpenRouterDecisions {
+            endpoint: endpoint.into(),
+            model: model.into(),
+            headers: Headers::new(),
+        }
+    }
+
     /// The common case for Workers AI.
     pub fn workers_ai(
         endpoint: impl Into<String>,
@@ -360,6 +386,11 @@ impl Wire {
         }
     }
 }
+
+/// Where OpenRouter serves its Decisions API (alpha, 2026-11): the default
+/// for the card that names [`Wire::OpenRouterDecisions`], which fills it in on
+/// its side — this crate takes no endpoint it was not handed.
+pub const OPENROUTER_DECISIONS_ENDPOINT: &str = "https://openrouter.ai/api/alpha";
 
 /// Azure's version when the card leaves it blank. Go's default, kept: an
 /// operator who has not thought about it gets a version that serves tools.
@@ -419,10 +450,12 @@ pub fn build(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Provider>> {
                 &endpoint, &model, &headers, &key,
             )?))
         }
-        Wire::TypeSafe { .. } | Wire::WorkersAi { .. } => Err(Error::Cannot {
-            wire: name,
-            verb: "chat",
-        }),
+        Wire::TypeSafe { .. } | Wire::OpenRouterDecisions { .. } | Wire::WorkersAi { .. } => {
+            Err(Error::Cannot {
+                wire: name,
+                verb: "chat",
+            })
+        }
     }
 }
 
@@ -443,6 +476,18 @@ pub fn build_judge(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Judge>> {
             require(name, "endpoint", &endpoint)?;
             require(name, "model", &model)?;
             Ok(Box::new(typesafe::TypeSafe::system_one(
+                &endpoint, &model, &headers, &key,
+            )?))
+        }
+        // The same body at OpenRouter, so the same client at another path.
+        Wire::OpenRouterDecisions {
+            endpoint,
+            model,
+            headers,
+        } => {
+            require(name, "endpoint", &endpoint)?;
+            require(name, "model", &model)?;
+            Ok(Box::new(typesafe::TypeSafe::openrouter(
                 &endpoint, &model, &headers, &key,
             )?))
         }
@@ -506,12 +551,13 @@ pub fn build_embed(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Embed>> {
                 &key,
             )?))
         }
-        Wire::Anthropic { .. } | Wire::TypeSafe { .. } | Wire::WorkersAi { .. } => {
-            Err(Error::Cannot {
-                wire: name,
-                verb: "embed",
-            })
-        }
+        Wire::Anthropic { .. }
+        | Wire::TypeSafe { .. }
+        | Wire::OpenRouterDecisions { .. }
+        | Wire::WorkersAi { .. } => Err(Error::Cannot {
+            wire: name,
+            verb: "embed",
+        }),
     }
 }
 
@@ -539,7 +585,8 @@ pub fn build_extract(wire: Wire, key: Option<Secret>) -> Result<Box<dyn Extract>
         Wire::OpenAi { .. }
         | Wire::Azure { .. }
         | Wire::Anthropic { .. }
-        | Wire::TypeSafe { .. } => Err(Error::Cannot {
+        | Wire::TypeSafe { .. }
+        | Wire::OpenRouterDecisions { .. } => Err(Error::Cannot {
             wire: name,
             verb: "extract",
         }),
@@ -795,7 +842,9 @@ mod tests {
             // resolved whichever trait it was built for, so each build that
             // accepts this wire must refuse it by the same field name.
             let doors: Vec<Result<()>> = match wire {
-                Wire::TypeSafe { .. } => vec![build_judge(wire, Some(Secret::from("k"))).map(drop)],
+                Wire::TypeSafe { .. } | Wire::OpenRouterDecisions { .. } => {
+                    vec![build_judge(wire, Some(Secret::from("k"))).map(drop)]
+                }
                 Wire::WorkersAi { .. } => {
                     vec![build_extract(wire, Some(Secret::from("k"))).map(drop)]
                 }
