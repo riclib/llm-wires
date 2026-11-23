@@ -312,7 +312,19 @@ struct WireUsage {
     output_tokens: u32,
     /// What the call billed, in US dollars. OpenRouter sends it; TypeSafe's
     /// own API does not, and it stays `None` there.
+    #[serde(default, deserialize_with = "lenient_cost")]
     cost: Option<f64>,
+}
+
+/// A number, or `None` for anything else: a string, `null`, an object. A
+/// billing field must never cost the caller the answers it rides beside, so
+/// a cost the wire cannot read is a cost it does not report, not a
+/// [`Error::Decode`] for the whole verdict. Read through a [`Value`] so a
+/// binary with `arbitrary_precision` on reads the number the same.
+fn lenient_cost<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<f64>, D::Error> {
+    Ok(Value::deserialize(d)?.as_f64())
 }
 
 pub(crate) fn response(

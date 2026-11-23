@@ -206,6 +206,46 @@ async fn typesafe_itself_reports_no_cost_and_none_is_made_up() {
     assert_eq!(v.cost, None);
 }
 
+#[tokio::test]
+async fn a_cost_that_is_not_a_number_is_no_cost_and_never_costs_the_answers() {
+    // Every reply answers the question; only the billing field differs.
+    for (usage, want) in [
+        (
+            r#"{"input_tokens":1,"output_tokens":0,"cost":"0.0001"}"#,
+            None,
+        ),
+        (r#"{"input_tokens":1,"output_tokens":0,"cost":null}"#, None),
+        (
+            r#"{"input_tokens":1,"output_tokens":0,"cost":{"usd":0.0001}}"#,
+            None,
+        ),
+        (r#"{"input_tokens":1,"output_tokens":0}"#, None),
+        ("null", None),
+        (
+            r#"{"input_tokens":1,"output_tokens":0,"cost":0.0001}"#,
+            Some(0.0001),
+        ),
+    ] {
+        let body: &'static str = Box::leak(
+            format!(
+                r#"{{"model":"m","answers":{{"q":{{"type":"noul","noul":0.9}}}},"usage":{usage}}}"#
+            )
+            .into_boxed_str(),
+        );
+        let f = fixture(Reply::Json(body)).await;
+        let v = llm_wires::build_judge(
+            Wire::openrouter_decisions(f.endpoint_at("/api/alpha"), "typesafe/jev-1.14"),
+            Some(Secret::from("k")),
+        )
+        .unwrap()
+        .judge(Judgement::of("x").ask("q", Question::noul("?")))
+        .await
+        .unwrap_or_else(|e| panic!("usage {usage}: {e}"));
+        assert_eq!(v.answers["q"], Answer::Noul { yes: 0.9 }, "usage {usage}");
+        assert_eq!(v.cost, want, "usage {usage}");
+    }
+}
+
 #[test]
 fn the_wire_is_a_judge_only_and_needs_its_endpoint() {
     let wire = || Wire::openrouter_decisions(llm_wires::OPENROUTER_DECISIONS_ENDPOINT, "m");
