@@ -21,6 +21,7 @@
 mod convert;
 mod decisions;
 mod embeddings;
+mod model;
 mod stream;
 
 pub(crate) use decisions::Decisions;
