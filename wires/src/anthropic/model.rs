@@ -41,3 +41,40 @@ pub fn takes_temperature(model: &str) -> bool {
         Some((_, version)) => version <= (4, 6),
     }
 }
+
+/// **Whether `model` can be told to stop thinking** — `thinking: {"type":
+/// "disabled"}` (solid #3783). Claude 4 and later take it, except the models
+/// that always think and answer it with a 400: Opus 5.5, every Fable and
+/// Mythos, and Sonnet 5.5 (whose nearest is `between_tools`, which is not
+/// off). An older number-first id and an id that is not Claude's are sent
+/// nothing, as before (Anthropic's model table,
+/// platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
+pub fn takes_thinking_off(model: &str) -> bool {
+    match generation(model) {
+        Some((family, version)) if !family.is_empty() && version.0 >= 4 => !matches!(
+            (family, version),
+            ("fable" | "mythos", _) | ("opus" | "sonnet", (5, 5))
+        ),
+        _ => false,
+    }
+}
+
+/// **Whether `model` takes `output_config.effort`** (#3783): Opus 4.5, and
+/// every Claude from 4.6 on. It applies to every output token, with thinking
+/// or without (platform.claude.com/docs/en/build-with-claude/effort).
+pub fn takes_effort(model: &str) -> bool {
+    match generation(model) {
+        Some((family, version)) if !family.is_empty() => {
+            version >= (4, 6) || (family, version) == ("opus", (4, 5))
+        }
+        _ => false,
+    }
+}
+
+/// **Whether `model` thinks adaptively** — `thinking: {"type": "adaptive"}`,
+/// its depth set by the effort (#3783): every Claude from 4.6 on. The 4.5
+/// line and before think only on a manual `budget_tokens`, which this wire
+/// does not send.
+pub fn takes_adaptive(model: &str) -> bool {
+    matches!(generation(model), Some((family, version)) if !family.is_empty() && version >= (4, 6))
+}

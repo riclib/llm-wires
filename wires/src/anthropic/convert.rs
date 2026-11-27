@@ -20,7 +20,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, ToolCall, Usage, http,
+    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, Thinking, ToolCall, Usage,
+    http,
 };
 
 use super::DEFAULT_MAX_TOKENS;
@@ -44,8 +45,28 @@ pub(crate) struct Request {
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    /// **[`ChatRequest::thinking`]**, half of it (solid #3783): `disabled`
+    /// for `off` where the model takes it, `adaptive` for the others where it
+    /// thinks adaptively ([`super::model`]); nothing otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingMode>,
+    /// The other half: `low`, `medium` or `high` as `effort`, where the
+    /// model takes it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
     #[serde(skip_serializing_if = "is_false")]
     stream: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingMode {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct OutputConfig {
+    effort: &'static str,
 }
 
 #[allow(clippy::trivially_copy_pass_by_ref)] // serde's skip_serializing_if shape
@@ -287,6 +308,7 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
         system.push(TextBlock::new(volatile));
     }
 
+    let (thinking, output_config) = thinking_of(model, req.thinking);
     Ok(Request {
         model: model.to_string(),
         max_tokens: req.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
@@ -300,11 +322,74 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
             .tool_choice
             .filter(|_| has_tools)
             .map(|name| ToolChoice { kind: "tool", name }),
-        temperature: req
-            .temperature
-            .filter(|_| super::model::takes_temperature(model) || refused_once(model)),
+        // A model that thinks takes no `temperature` on the versions that
+        // still take one (4.6 and before): left out, said once.
+        temperature: req.temperature.filter(|_| {
+            (super::model::takes_temperature(model) || refused_once(model))
+                && (thinking.as_ref().is_none_or(|t| t.kind == "disabled")
+                    || said_once(
+                        model,
+                        "thinking is on, which takes no `temperature`: the request goes without it",
+                    ))
+        }),
+        thinking,
+        output_config,
         stream,
     })
+}
+
+/// **What a chat request's `thinking` is on this wire** (solid #3783), as
+/// [`super::model`] says the model takes it: `off` is `disabled`; `low`,
+/// `medium` and `high` are that `effort` and, from 4.6, `adaptive` thinking —
+/// so a model whose default is off thinks when asked to. What the model has
+/// no word for is left out and said once, never sent to be refused.
+fn thinking_of(
+    model: &str,
+    thinking: Option<Thinking>,
+) -> (Option<ThinkingMode>, Option<OutputConfig>) {
+    match thinking {
+        None => (None, None),
+        Some(Thinking::Off) => match super::model::takes_thinking_off(model) {
+            true => (Some(ThinkingMode { kind: "disabled" }), None),
+            false => {
+                said_once(
+                    model,
+                    "this model cannot be told not to think: `thinking: off` is not sent",
+                );
+                (None, None)
+            }
+        },
+        Some(level) => {
+            let effort = super::model::takes_effort(model).then(|| OutputConfig {
+                effort: level.as_str(),
+            });
+            let mode =
+                super::model::takes_adaptive(model).then_some(ThinkingMode { kind: "adaptive" });
+            if effort.is_none() && mode.is_none() {
+                said_once(
+                    model,
+                    "this model takes neither an effort nor adaptive thinking: `thinking:` is not sent",
+                );
+            }
+            (mode, effort)
+        }
+    }
+}
+
+/// Logs `what` the first time only for each model, and answers `false`.
+fn said_once(model: &str, what: &'static str) -> bool {
+    static SAID: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<(String, &'static str)>>,
+    > = std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    if said
+        .lock()
+        .map(|mut s| s.insert((model.to_string(), what)))
+        .unwrap_or(false)
+    {
+        tracing::warn!(model, "{what}");
+    }
+    false
 }
 
 /// Logs, the first time only for each model, that its `temperature` is left
@@ -796,6 +881,126 @@ mod tests {
             ..ChatRequest::default()
         };
         assert!(build(req).get("tool_choice").is_none());
+    }
+
+    /// **`thinking` as each Claude takes it** (solid #3783, Anthropic's model
+    /// table): `off` is `disabled` where the model can stop thinking and
+    /// nothing where it cannot (Opus 5.5, Sonnet 5.5, Fable, Mythos); a level
+    /// is that `effort` (Opus 4.5, and 4.6 on) and, from 4.6, `adaptive`
+    /// thinking; a 4.6 that thinks is sent no `temperature`; and an id that is
+    /// not Claude's, or an unset `thinking`, sends nothing new at all.
+    #[test]
+    fn thinking_is_said_as_each_claude_takes_it() {
+        use super::super::model::{takes_adaptive, takes_effort, takes_thinking_off};
+        for model in [
+            "claude-opus-5",
+            "claude-sonnet-5",
+            "claude-haiku-5-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-sonnet-4-6",
+            "claude-opus-4-5",
+            "claude-haiku-4-5",
+            "claude-opus-4-20250514",
+        ] {
+            assert!(
+                takes_thinking_off(model),
+                "{model} cannot be told not to think"
+            );
+        }
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-fable-5-2",
+            "claude-mythos-5",
+            "claude-3-5-sonnet-20241022",
+            "gpt-4o",
+        ] {
+            assert!(!takes_thinking_off(model), "{model} is told disabled");
+        }
+        for model in [
+            "claude-opus-4-5",
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-5-5",
+            "claude-haiku-5-5",
+            "claude-fable-5-2",
+        ] {
+            assert!(takes_effort(model), "{model} takes no effort");
+        }
+        for model in [
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5",
+            "claude-opus-4-20250514",
+            "gpt-4o",
+        ] {
+            assert!(!takes_effort(model), "{model} takes an effort");
+        }
+        assert!(takes_adaptive("claude-sonnet-4-6") && takes_adaptive("anthropic.claude-opus-5-5"));
+        assert!(!takes_adaptive("claude-opus-4-5") && !takes_adaptive("gpt-4o"));
+
+        let sent = |model: &str, t: Option<Thinking>, temperature: Option<f64>| {
+            let req = ChatRequest {
+                messages: vec![Message::user("hi")],
+                thinking: t,
+                temperature,
+                ..Default::default()
+            };
+            json(request(req, model, false).unwrap())
+        };
+        let unset = sent("claude-sonnet-4-6", None, Some(0.0));
+        assert!(
+            unset.get("thinking").is_none() && unset.get("output_config").is_none(),
+            "{unset}"
+        );
+        assert_eq!(unset["temperature"], 0.0, "{unset}");
+
+        let off = sent("claude-sonnet-5", Some(Thinking::Off), None);
+        assert_eq!(
+            off["thinking"],
+            serde_json::json!({"type": "disabled"}),
+            "{off}"
+        );
+        assert!(off.get("output_config").is_none(), "{off}");
+        let always = sent("claude-opus-5-5", Some(Thinking::Off), None);
+        assert!(
+            always.get("thinking").is_none(),
+            "Opus 5.5 is never sent disabled: {always}"
+        );
+
+        let high = sent("claude-opus-5-5", Some(Thinking::High), None);
+        assert_eq!(
+            high["thinking"],
+            serde_json::json!({"type": "adaptive"}),
+            "{high}"
+        );
+        assert_eq!(
+            high["output_config"],
+            serde_json::json!({"effort": "high"}),
+            "{high}"
+        );
+        let low46 = sent("claude-sonnet-4-6", Some(Thinking::Low), Some(0.0));
+        assert_eq!(low46["output_config"]["effort"], "low", "{low46}");
+        assert!(
+            low46.get("temperature").is_none(),
+            "a 4.6 that thinks takes no temperature: {low46}"
+        );
+        let off46 = sent("claude-sonnet-4-6", Some(Thinking::Off), Some(0.0));
+        assert_eq!(
+            off46["temperature"], 0.0,
+            "off keeps a 4.6's temperature: {off46}"
+        );
+        let opus45 = sent("claude-opus-4-5", Some(Thinking::Medium), None);
+        assert_eq!(opus45["output_config"]["effort"], "medium", "{opus45}");
+        assert!(
+            opus45.get("thinking").is_none(),
+            "4.5 has no adaptive: {opus45}"
+        );
+        let gateway = sent("gpt-4o", Some(Thinking::High), None);
+        assert!(
+            gateway.get("thinking").is_none() && gateway.get("output_config").is_none(),
+            "{gateway}"
+        );
     }
 
     #[test]
