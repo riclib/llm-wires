@@ -149,8 +149,8 @@ pub use extraction::{
 pub use image::Image;
 pub use judgement::{Answer, Judgement, Question, Verdict};
 pub use types::{
-    ChatRequest, ChatResponse, Chunk, Finish, Info, Message, Role, Tool, ToolCall, ToolCallDelta,
-    Usage,
+    ChatRequest, ChatResponse, Chunk, Finish, Info, Message, Role, Thinking, Tool, ToolCall,
+    ToolCallDelta, Usage,
 };
 
 /// A streamed turn: chunks in order, then the end.

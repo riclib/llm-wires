@@ -140,6 +140,39 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
+/// **How much a model reasons before it answers** ([`ChatRequest::thinking`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Thinking {
+    /// No reasoning trace: the answer straight away.
+    Off,
+    Low,
+    Medium,
+    High,
+}
+
+impl Thinking {
+    /// The word as a card or a log says it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Thinking::Off => "off",
+            Thinking::Low => "low",
+            Thinking::Medium => "medium",
+            Thinking::High => "high",
+        }
+    }
+
+    /// The word back, any case; `None` for one this enum does not have.
+    pub fn parse(word: &str) -> Option<Thinking> {
+        match word.trim().to_ascii_lowercase().as_str() {
+            "off" => Some(Thinking::Off),
+            "low" => Some(Thinking::Low),
+            "medium" => Some(Thinking::Medium),
+            "high" => Some(Thinking::High),
+            _ => None,
+        }
+    }
+}
+
 /// A chat turn to run.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ChatRequest {
@@ -151,6 +184,15 @@ pub struct ChatRequest {
     pub tool_choice: Option<String>,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
+    /// **How hard the model thinks before it answers** — `None` is the
+    /// model's own default, and the request is byte-identical to one that
+    /// never had the field. Each wire says it in its own words:
+    /// `reasoning_effort` on the OpenAI wire (which an Ollama `/v1` endpoint
+    /// also reads: `off` is `"none"`, and a thinking model then answers
+    /// without its trace), `output_config.effort` and `thinking` on
+    /// Anthropic's, as each model takes them. A wire that has no word for it
+    /// sends nothing.
+    pub thinking: Option<Thinking>,
     /// The system prompt. Wires that have no system role put it first as a
     /// system message; wires that do (Anthropic) put it in its own field.
     ///

@@ -7,7 +7,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, ToolCall, Usage, http,
+    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, Thinking, ToolCall, Usage,
+    http,
 };
 
 // ---------------------------------------------------------------- the request
@@ -23,6 +24,15 @@ pub(crate) struct Request {
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
+    /// **[`ChatRequest::thinking`]** as this wire says it: `none`, `low`,
+    /// `medium`, `high`. OpenAI's reasoning models take all four (gpt-5.4
+    /// answers `none` with no reasoning tokens) and so does an Ollama `/v1`
+    /// endpoint, where `none` is what turns a thinking model's trace off
+    /// (0.40.11: qwen3.6 from 136 tokens and 10.6 s to 2 and 0.1 s; its
+    /// native `think: false` is not read on `/v1`). A model that reasons not
+    /// at all refuses the field, so it goes only where the caller set it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     /// `max_tokens` was deprecated in favour of this on the chat wire, and
     /// reasoning models refuse the old name.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -216,6 +226,10 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Request {
                 function: NamedTool { name },
             }),
         temperature: req.temperature,
+        reasoning_effort: req.thinking.map(|t| match t {
+            Thinking::Off => "none",
+            other => other.as_str(),
+        }),
         max_completion_tokens: req.max_tokens,
         stream,
         stream_options: stream.then_some(StreamOptions {
@@ -430,6 +444,7 @@ mod tests {
             tool_choice: Some("get_weather".into()),
             temperature: Some(0.2),
             max_tokens: Some(256),
+            thinking: None,
             system: String::new(),
             system_volatile: String::new(),
             cache_stable_prefix: true,
@@ -464,6 +479,32 @@ mod tests {
             }),
             "cache_stable_prefix leaves the OpenAI request byte-identical"
         );
+    }
+
+    /// **`thinking` is `reasoning_effort`, and `off` is `none`** (solid
+    /// #3783): what both OpenAI's reasoning models and an Ollama `/v1`
+    /// endpoint read; unset sends no key, so a model that does not reason is
+    /// never asked to.
+    #[test]
+    fn thinking_is_reasoning_effort_and_off_is_none() {
+        let with = |t: Option<Thinking>| {
+            let mut req = ChatRequest::ask("", "hi");
+            req.thinking = t;
+            json(request(req, "qwen3.6", false))
+        };
+        assert!(
+            with(None).get("reasoning_effort").is_none(),
+            "{}",
+            with(None)
+        );
+        for (t, word) in [
+            (Thinking::Off, "none"),
+            (Thinking::Low, "low"),
+            (Thinking::Medium, "medium"),
+            (Thinking::High, "high"),
+        ] {
+            assert_eq!(with(Some(t))["reasoning_effort"], word, "{t:?}");
+        }
     }
 
     #[test]

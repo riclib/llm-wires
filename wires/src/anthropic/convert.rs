@@ -567,6 +567,7 @@ mod tests {
             tool_choice: Some("get_weather".into()),
             temperature: Some(0.2),
             max_tokens: Some(256),
+            thinking: None,
             ..ChatRequest::default()
         };
         let out = build(req);
