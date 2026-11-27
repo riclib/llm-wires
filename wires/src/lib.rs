@@ -114,6 +114,25 @@
 //! which is what closes the connection. There is nothing to remember to call.
 
 mod anthropic;
+
+/// Logs `what` the first time only for each model, and answers `false`: what
+/// a wire leaves out of a request because the model would refuse it is said
+/// once a process, never on every call.
+pub(crate) fn said_once(model: &str, what: &'static str) -> bool {
+    static SAID: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeSet<(String, &'static str)>>,
+    > = std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    if said
+        .lock()
+        .map(|mut s| s.insert((model.to_string(), what)))
+        .unwrap_or(false)
+    {
+        tracing::warn!(model, "{what}");
+    }
+    false
+}
+
 mod embedding;
 mod error;
 mod extraction;

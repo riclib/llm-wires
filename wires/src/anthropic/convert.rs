@@ -376,21 +376,7 @@ fn thinking_of(
     }
 }
 
-/// Logs `what` the first time only for each model, and answers `false`.
-fn said_once(model: &str, what: &'static str) -> bool {
-    static SAID: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::BTreeSet<(String, &'static str)>>,
-    > = std::sync::OnceLock::new();
-    let said = SAID.get_or_init(Default::default);
-    if said
-        .lock()
-        .map(|mut s| s.insert((model.to_string(), what)))
-        .unwrap_or(false)
-    {
-        tracing::warn!(model, "{what}");
-    }
-    false
-}
+use crate::said_once;
 
 /// Logs, the first time only for each model, that its `temperature` is left
 /// out, and answers `false`: the request goes without it.
@@ -913,11 +899,16 @@ mod tests {
             "claude-sonnet-5-5",
             "claude-fable-5-2",
             "claude-mythos-5",
+            "claude-opus-6",
+            "claude-sonnet-5-6",
             "claude-3-5-sonnet-20241022",
             "gpt-4o",
         ] {
             assert!(!takes_thinking_off(model), "{model} is told disabled");
         }
+        // A Vertex id says its date after an `@`; the next generation is not
+        // assumed to take `disabled` (#3783's read, S1).
+        assert!(takes_thinking_off("claude-sonnet-4-5@20250929"));
         for model in [
             "claude-opus-4-5",
             "claude-opus-4-6",

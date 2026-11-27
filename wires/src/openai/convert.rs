@@ -7,8 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, Thinking, ToolCall, Usage,
-    http,
+    ChatRequest, ChatResponse, Error, Finish, Message, Result, Role, ToolCall, Usage, http,
 };
 
 // ---------------------------------------------------------------- the request
@@ -24,13 +23,14 @@ pub(crate) struct Request {
     tool_choice: Option<ToolChoice>,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f64>,
-    /// **[`ChatRequest::thinking`]** as this wire says it: `none`, `low`,
-    /// `medium`, `high`. OpenAI's reasoning models take all four (gpt-5.4
-    /// answers `none` with no reasoning tokens) and so does an Ollama `/v1`
-    /// endpoint, where `none` is what turns a thinking model's trace off
-    /// (0.40.11: qwen3.6 from 136 tokens and 10.6 s to 2 and 0.1 s; its
-    /// native `think: false` is not read on `/v1`). A model that reasons not
-    /// at all refuses the field, so it goes only where the caller set it.
+    /// **[`ChatRequest::thinking`]** as this wire says it, as the model takes
+    /// it ([`super::model::effort`]): `none`, `low`, `medium`, `high` for
+    /// gpt-5.1 on and for any id not OpenAI's own — an Ollama `/v1` endpoint
+    /// reads `none` as no thinking (0.40.11: qwen3.6 from 136 tokens and
+    /// 10.6 s to 2 and 0.1 s; its native `think: false` is not read on
+    /// `/v1`) — `minimal` for `off` on the first gpt-5 line, nothing for `off`
+    /// on the o-series, and nothing at all on a model that does not reason,
+    /// which refuses the field. Unset sends no key.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
     /// `max_tokens` was deprecated in favour of this on the chat wire, and
@@ -226,10 +226,7 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Request {
                 function: NamedTool { name },
             }),
         temperature: req.temperature,
-        reasoning_effort: req.thinking.map(|t| match t {
-            Thinking::Off => "none",
-            other => other.as_str(),
-        }),
+        reasoning_effort: req.thinking.and_then(|t| super::model::effort(model, t)),
         max_completion_tokens: req.max_tokens,
         stream,
         stream_options: stream.then_some(StreamOptions {
@@ -487,6 +484,7 @@ mod tests {
     /// never asked to.
     #[test]
     fn thinking_is_reasoning_effort_and_off_is_none() {
+        use crate::Thinking;
         let with = |t: Option<Thinking>| {
             let mut req = ChatRequest::ask("", "hi");
             req.thinking = t;

@@ -43,20 +43,25 @@ pub fn takes_temperature(model: &str) -> bool {
 }
 
 /// **Whether `model` can be told to stop thinking** — `thinking: {"type":
-/// "disabled"}` (solid #3783). Claude 4 and later take it, except the models
-/// that always think and answer it with a 400: Opus 5.5, every Fable and
-/// Mythos, and Sonnet 5.5 (whose nearest is `between_tools`, which is not
-/// off). An older number-first id and an id that is not Claude's are sent
-/// nothing, as before (Anthropic's model table,
-/// platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
+/// "disabled"}` (solid #3783). **An allowlist**: the generations Anthropic's
+/// model table says take it — Opus 4, 4.1, 4.5–4.8 and 5; Sonnet 4, 4.5,
+/// 4.6 and 5; Haiku 4.5 and 5.5 (Opus 5 and Haiku 5.5 at an effort of
+/// `high` or below, which `off` sends none of). The models that always think
+/// answer it with a 400 — Opus 5.5, every Fable and Mythos, Sonnet 5.5 — and
+/// so might the next generation, so a model this table does not name, a
+/// number-first id and an id that is not Claude's are sent nothing
+/// (platform.claude.com/docs/en/build-with-claude/thinking-troubleshooting).
 pub fn takes_thinking_off(model: &str) -> bool {
-    match generation(model) {
-        Some((family, version)) if !family.is_empty() && version.0 >= 4 => !matches!(
-            (family, version),
-            ("fable" | "mythos", _) | ("opus" | "sonnet", (5, 5))
-        ),
-        _ => false,
-    }
+    matches!(
+        generation(model),
+        Some(
+            (
+                "opus",
+                (4, 0) | (4, 1) | (4, 5) | (4, 6) | (4, 7) | (4, 8) | (5, 0)
+            ) | ("sonnet", (4, 0) | (4, 5) | (4, 6) | (5, 0))
+                | ("haiku", (4, 5) | (5, 5))
+        )
+    )
 }
 
 /// **Whether `model` takes `output_config.effort`** (#3783): Opus 4.5, and

@@ -141,7 +141,11 @@ pub struct ToolCall {
 }
 
 /// **How much a model reasons before it answers** ([`ChatRequest::thinking`]).
+///
+/// `#[non_exhaustive]`, so a level a provider adds later (`minimal`,
+/// `xhigh`) is a release that breaks nobody's `match`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Thinking {
     /// No reasoning trace: the answer straight away.
     Off,
@@ -369,6 +373,29 @@ pub struct Info {
 
 #[cfg(test)]
 mod tests {
+
+    /// **A card's word reads back as the level, any case, and an unknown one
+    /// as none** (#3783's read, N).
+    #[test]
+    fn thinking_parses_its_own_words_and_no_others() {
+        use super::Thinking;
+        for t in [
+            Thinking::Off,
+            Thinking::Low,
+            Thinking::Medium,
+            Thinking::High,
+        ] {
+            assert_eq!(Thinking::parse(t.as_str()), Some(t));
+            assert_eq!(
+                Thinking::parse(&format!(" {} ", t.as_str().to_uppercase())),
+                Some(t)
+            );
+        }
+        for word in ["", "none", "minimal", "max", "loud"] {
+            assert_eq!(Thinking::parse(word), None, "{word}");
+        }
+    }
+
     use super::*;
 
     #[test]
