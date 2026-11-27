@@ -300,9 +300,30 @@ pub(crate) fn request(req: ChatRequest, model: &str, stream: bool) -> Result<Req
             .tool_choice
             .filter(|_| has_tools)
             .map(|name| ToolChoice { kind: "tool", name }),
-        temperature: req.temperature,
+        temperature: req
+            .temperature
+            .filter(|_| super::model::takes_temperature(model) || refused_once(model)),
         stream,
     })
+}
+
+/// Logs, the first time only for each model, that its `temperature` is left
+/// out, and answers `false`: the request goes without it.
+fn refused_once(model: &str) -> bool {
+    static SAID: std::sync::OnceLock<std::sync::Mutex<std::collections::BTreeSet<String>>> =
+        std::sync::OnceLock::new();
+    let said = SAID.get_or_init(Default::default);
+    if said
+        .lock()
+        .map(|mut s| s.insert(model.to_string()))
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            model,
+            "this model refuses `temperature`: the request goes without it"
+        );
+    }
+    false
 }
 
 /// A replayed tool call's arguments as this wire wants them: an object.
@@ -774,6 +795,50 @@ mod tests {
             ..ChatRequest::default()
         };
         assert!(build(req).get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn a_model_that_refuses_temperature_is_sent_none_and_an_older_one_keeps_it() {
+        for model in [
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "claude-haiku-5-5",
+            "claude-sonnet-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "anthropic.claude-opus-5-5",
+        ] {
+            assert!(
+                !super::super::model::takes_temperature(model),
+                "{model} takes temperature"
+            );
+        }
+        for model in [
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-haiku-4-5",
+            "claude-sonnet-4-5-20250929",
+            "claude-opus-4-20250514",
+            "claude-3-5-sonnet-20241022",
+            "us.anthropic.claude-sonnet-4-6",
+            "gpt-4o",
+        ] {
+            assert!(
+                super::super::model::takes_temperature(model),
+                "{model} does not take temperature"
+            );
+        }
+        let asked = || ChatRequest {
+            messages: vec![Message::user("hi")],
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+        let sent = |model: &str| json(request(asked(), model, false).unwrap());
+        assert!(sent("claude-sonnet-5-5").get("temperature").is_none());
+        assert_eq!(sent("claude-sonnet-4-6")["temperature"], 0.0);
     }
 
     #[test]

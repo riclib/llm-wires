@@ -17,6 +17,7 @@
 //! and a `Chunk` field nothing above this crate reads yet).
 
 mod convert;
+pub(crate) mod model;
 mod stream;
 
 use async_trait::async_trait;
