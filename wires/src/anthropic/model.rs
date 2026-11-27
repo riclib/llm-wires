@@ -9,7 +9,7 @@
 /// `("opus", (4, 6))`, `claude-opus-4-20250514` `("opus", (4, 0))`, and the
 /// old number-first naming (`claude-3-5-sonnet-…`) is `("", (3, 0))`.
 /// `None` for an id that is not Claude's.
-pub(crate) fn generation(model: &str) -> Option<(&str, (u32, u32))> {
+pub fn generation(model: &str) -> Option<(&str, (u32, u32))> {
     let at = model.find("claude-")?;
     let mut parts = model[at + "claude-".len()..].split(['-', '@', ':', '.']);
     let first = parts.next()?;
@@ -35,7 +35,7 @@ pub(crate) fn generation(model: &str) -> Option<(&str, (u32, u32))> {
 /// at 4.7 or later is sent no
 /// `temperature`; a 4.6 or older one, and an id that is not Claude's, is sent
 /// what it was asked. Fable and Mythos are 5.x, so the version says it.
-pub(crate) fn takes_temperature(model: &str) -> bool {
+pub fn takes_temperature(model: &str) -> bool {
     match generation(model) {
         None => true,
         Some((_, version)) => version <= (4, 6),

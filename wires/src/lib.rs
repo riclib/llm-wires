@@ -136,6 +136,10 @@ use async_trait::async_trait;
 use futures_util::Stream;
 use wire_secret::Secret;
 
+/// **What each Anthropic model accepts**, by id: the table the anthropic
+/// wire asks before it sends a parameter a model refuses, public so a caller
+/// can tell an author the same before a request is made.
+pub use anthropic::model as anthropic_model;
 pub use embedding::{EmbedRequest, EmbedResponse};
 pub use error::{Error, Result};
 pub use extraction::{
